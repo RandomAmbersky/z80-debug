@@ -27,7 +27,10 @@ export class Disassembler extends EventEmitter {
 	public memory = new Memory();
 
 	/// The labels.
-	protected labels: Map<number,DisLabel>;
+	public labels: Map<number,DisLabel>;
+
+	/// The reverted labels map. Created when a callgraph is output.
+	protected revertedLabelMap: Map<string, number>;
 
 	/// Temporarily offset labels. Just an offset number of the address of the real label.
 	protected offsetLabels: Map<number,number>;
@@ -52,7 +55,7 @@ export class Disassembler extends EventEmitter {
 	protected statisticsMin: SubroutineStatistics = { sizeInBytes:Number.MAX_SAFE_INTEGER, countOfInstructions: Number.MAX_SAFE_INTEGER, CyclomaticComplexity: Number.MAX_SAFE_INTEGER };
 
 	/// Labels that should be marked (with a color) are put here. String contains the color of the label for the dot graphic.
-	protected dotMarkedLabels = new Map<number, string>();
+	protected dotMarkedLabels = new Map<number|string, string>();
 
 	// dot-color for warning-marks for labels.
 	protected dotWarningMark = 'lightblue';
@@ -101,11 +104,23 @@ export class Disassembler extends EventEmitter {
 	public clmsnOpcodeTotal = 5 + 6 + 1;		///< Total length of the opcodes. After this an optional comment may start.
 
 
-	// Dot format options. E.g. "${label}\n${address}\nCC=${CC}\nSize=${size}\ninstr=${instructions}\n"
-	//public dotFormat = "${label}\\n0x${address}\\nCC=${CC}\\nInstr=${instructions}\\n";
-	public dotFormat = "${label}\\n0x${address}\\nSize=${size}\\n";
-	//public dotFormat = "${label}\\nID=${id}\\n0x${address}\\nSize=${size}\\nInstr=${instructions}\\nCC=${CC}\\n";
+	// Dot format options for the node. E.g. "${label}\n${address}\nCC=${CC}\nSize=${size}\ninstr=${instructions}\n"
+	public dotFormatString = "rankdir=TB;";	// Graph direction
 
+	// Dot format options for the node. E.g. "${label}\n${address}\nCC=${CC}\nSize=${size}\ninstr=${instructions}\n"
+	public nodeFormatString = "${label}\\n0x${address}\\nSize=${size}\\n";
+
+	/// RST addresses that shouldn't be followed on a disassembly.
+	/// Note: It can happen that code around ORG 0000h has to be disassembled.
+	/// But at the same time the ESXDOS RST 8 is used for file handling.
+	/// This is a hardwired RST. It does not exist in ROM.
+	/// RST addresses that appear in this list will not be followed/disassembled.
+	public rstDontFollowAddresses = new Array<number>();
+
+	/// An array that either contains label names or addresses,
+	/// but both as string. If defined only the labels inside this
+	/// list are used for the dot graphics.
+	public graphLabels = new Array<string|number>();
 
 	/// The disassembled lines.
 	protected disassembledLines: Array<string>;
@@ -122,12 +137,16 @@ export class Disassembler extends EventEmitter {
 	/// Add decimal conversion to addresses (at beginning of line)
 	protected DBG_ADD_DEC_ADDRESS = false; //true;
 
-
 	// Warnings
 
 	/// true = disable warning when trying to disassemble unassigned memory.
 	/// will be set to true automatically if SNA has been selected.
 	protected no_warning_disassemble_unassigned_memory = false;
+
+
+	// For DeZog. Used to turn off any comments in the disassembled text.
+	public disableCommentsInDisassembly=false;
+
 
 	/**
 	 * Initializes the Opcode formatting.
@@ -257,7 +276,9 @@ export class Disassembler extends EventEmitter {
 		this.assignLabelNames();
 
 		// Add label comments
-		this.addLabelComments();
+		if (!this.disableCommentsInDisassembly)
+			this.addLabelComments();
+
 
 		// Disassemble opcode with label names
 		const disLines = this.disassembleMemory();
@@ -347,7 +368,8 @@ export class Disassembler extends EventEmitter {
 		// get new arrays/maps.
 		this.labels = new Map<number,DisLabel>();
 		this.offsetLabels = new Map<number,number>();
-		this.addressParents = new Array<DisLabel>();
+		this.addressParents=new Array<DisLabel>();
+		this.addressComments=new Map<number, Comment>();
 	}
 
 
@@ -362,7 +384,17 @@ export class Disassembler extends EventEmitter {
 	 * @param type of the label. Default is CODE_LBL.
 	 */
 	public setLabel(address: number, name?: string, type = NumberType.CODE_LBL) {
-		const label = new DisLabel(type);
+		// Check if label already set.
+		let label = this.labels.get(address);
+		if(label) {
+			// Exists already, just overwrite the name
+			if(!label.name || !label.isFixed)	// Don't overwrite names given for fixed addresses.
+				(label.name as any) = name;
+			return;
+		}
+
+		// Create a new label
+		label = new DisLabel(type);
 		this.labels.set(address, label);
 		(label.name as any) = name;	// allow undefined
 		// Check if out of range
@@ -392,9 +424,17 @@ export class Disassembler extends EventEmitter {
 	 * @param name
 	 */
 	public setFixedCodeLabel(address: number, name?: string) {
-		const label = new DisLabel(NumberType.CODE_LBL);
-		this.labels.set(address, label);
-		(label.name as any) = name;	// allow undefined
+		// Check if label already set.
+		let label = this.labels.get(address);
+		if(!label) {
+			// Create new label
+			label = new DisLabel(NumberType.CODE_LBL);
+			this.labels.set(address, label);
+		}
+
+		// Set name
+		if(name)
+			(label.name as any) = name;
 		// Check if out of range
 		const attr = this.memory.getAttributeAt(address);
 		if(attr & MemAttribute.ASSIGNED)
@@ -519,17 +559,19 @@ export class Disassembler extends EventEmitter {
 		for(let [address, label] of this.labels) {
 			// Check if EQU
 			if(label.isEqu) {
-				if(firstLabel) {
-					// At the start of the EQU area print a comment.
-					lines.push('; EQU:');
-					lines.push('; Data addresses used by the opcodes that point to uninitialized memory areas.');
+				if (firstLabel) {
+					if (!this.disableCommentsInDisassembly) {
+						// At the start of the EQU area print a comment.
+						lines.push('; EQU:');
+						lines.push('; Data addresses used by the opcodes that point to uninitialized memory areas.');
+					}
 					firstLabel = false;
 				}
 				// "Disassemble"
 				const statement =  Format.addSpaces(label.name+':', this.clmnsBytes-1) + ' ' + this.rightCase('EQU ') + Format.fillDigits(Format.getHexString(address,4), ' ', 5) +'h';
 				// Comment
 				const comment = this.addressComments.get(address);
-				const commentLines = Comment.getLines(comment, statement);
+				const commentLines=Comment.getLines(comment, statement, this.disableCommentsInDisassembly);
 				// Store
 				lines.push(...commentLines);
 			}
@@ -558,7 +600,9 @@ export class Disassembler extends EventEmitter {
 		while((address = this.addressQueue.shift()) != undefined) {
 			//console.log('address=0x' + address.toString(16));
 			// disassemble until stop-code
+			//console.log('===');
 			do {
+				//console.log('addr=' + address.toString(16));
 				// Check if memory has already been disassembled
 				let attr = this.memory.getAttributeAt(address);
 				if(attr & MemAttribute.CODE)
@@ -714,7 +758,7 @@ export class Disassembler extends EventEmitter {
 	 * Note: Another strategy to find interrupts would be to examine the trace from the
 	 * tr file. If an address change happens that is bigger than +/-128 it must be
 	 * at least a JP/CALL label or an interrupt call. The label can be added here.
-	 * Later teh JP/CALL labels would be found anyway (most probably).
+	 * Later the JP/CALL labels would be found anyway (most probably).
 	 */
 	protected findInterruptLabels() {
 		const foundInterrupts = new Array<number>();
@@ -797,7 +841,7 @@ export class Disassembler extends EventEmitter {
 	 */
 	protected disassembleForLabel(opcodeAddress: number, opcode: Opcode): boolean {
 
-		// Check for branching etc. (CALL, JP, JR)
+		// Check for branching etc. (CALL, RST, JP, JR)
 		if(opcode.flags & OpcodeFlag.BRANCH_ADDRESS) {
 			// It is a label.
 
@@ -826,7 +870,10 @@ export class Disassembler extends EventEmitter {
 				// It has not been disassembled yet
 				if(attr & MemAttribute.ASSIGNED) {
 					// memory location exists, so queue it for disassembly
-					this.addressQueue.push(branchAddress);
+					if(vType != NumberType.CODE_RST || this.rstDontFollowAddresses.indexOf(branchAddress) < 0) {
+						// But only if it is not a RST address which was banned by the user.
+						this.addressQueue.push(branchAddress);
+					}
 				}
 			}
 		}
@@ -1454,8 +1501,16 @@ export class Disassembler extends EventEmitter {
 			if(label.isEqu)
 				continue;
 			switch(label.type) {
-				case NumberType.CODE_SUB:
 				case NumberType.CODE_RST:
+					// Check if rst is turned off
+					if(this.rstDontFollowAddresses.indexOf(address) >= 0) {
+						const statistics = {sizeInBytes:0, countOfInstructions:0, CyclomaticComplexity:0};
+						this.subroutineStatistics.set(label, statistics);
+						break;	// Don't count statistics.
+					}
+
+					// Otherwise flow through.
+				case NumberType.CODE_SUB:
 				case NumberType.CODE_LBL:
 					// Get all addresses belonging to the subroutine
 					const addresses = new Array<number>();
@@ -1769,7 +1824,9 @@ export class Disassembler extends EventEmitter {
 	 * @param address The address.
 	 */
 	protected getAddressComment(address: number): Comment|undefined {
-		let comments = this.addressComments.get(address);
+		if (this.disableCommentsInDisassembly)
+			return undefined;
+		let comments=this.addressComments.get(address);
 		if(comments)
 			return comments;
 		return this.getLabelComments(address);
@@ -1927,9 +1984,8 @@ export class Disassembler extends EventEmitter {
 		for(const line of commentsLines) {
 			lineNr ++;
 			// Read in comments "before"
-			const match = /^\s*([^;]+)?(;.*)?(\S+)?/.exec(line);
+			const match = /^\s*([^;]+)?(;.*)?(\S+)?/.exec(line)!;
 			assert(match);
-			if(!match)	continue;	// calm the transpiler
 			const addressPart = match[1];
 			const commentPart = match[2];
 			const misc = match[3];
@@ -1971,11 +2027,11 @@ export class Disassembler extends EventEmitter {
 				case State.lineOn:
 					comment.inlineComment = commentPart;
 					// Determine address and label
-					const match2 = /^([0-9a-f]+)(\s+([a-z][a-z_0-9]*))?/i.exec(addressPart);
+					const match2 = /^(0x)?([0-9a-f]+)(\s+([\w\.]+))?/i.exec(addressPart);
 					if(match2) {
-						const addrString = match2[1];
+						const addrString = match2[2];
 						commentAddr = parseInt(addrString,16);
-						commentLabelName = match2[3];
+						commentLabelName = match2[4];
 						// Next state
 						state = State.LinesAfter;
 					}
@@ -2015,7 +2071,7 @@ export class Disassembler extends EventEmitter {
 			// Store address, label and comments
 			const addrLabelLine = Format.getHexString(address, 4) + '\t' + label.name;
 			const comment = this.getAddressComment(address);
-			const commentLines = Comment.getLines(comment, addrLabelLine);
+			const commentLines=Comment.getLines(comment, addrLabelLine, this.disableCommentsInDisassembly);
 
 			text += commentLines.join('\n');
 
@@ -2052,7 +2108,9 @@ export class Disassembler extends EventEmitter {
 				// First line
 				// Print "ORG"
 				this.addEmptyLines(lines);
-				const orgLine =  ' '.repeat(this.clmnsBytes) + this.rightCase('ORG ') + Format.getHexString(addr)+'h ; ' + Format.getConversionForAddress(addr);
+				let orgLine=' '.repeat(this.clmnsBytes)+this.rightCase('ORG ')+Format.getHexString(addr)+'h';
+				if (!this.disableCommentsInDisassembly)
+					orgLine+='; '+Format.getConversionForAddress(addr);
 				lines.push(orgLine);
 			}
 			else {
@@ -2063,7 +2121,9 @@ export class Disassembler extends EventEmitter {
 
 				// Print new "ORG"
 				this.addEmptyLines(lines);
-				const orgLine =  ' '.repeat(this.clmnsBytes) + this.rightCase('ORG ') + Format.getHexString(addr)+'h ; ' + Format.getConversionForAddress(addr);
+				let orgLine=' '.repeat(this.clmnsBytes)+this.rightCase('ORG ')+Format.getHexString(addr)+'h';
+				if (!this.disableCommentsInDisassembly)
+					orgLine+='; '+Format.getConversionForAddress(addr);
 				lines.push(orgLine);
 			}
 
@@ -2110,7 +2170,7 @@ export class Disassembler extends EventEmitter {
 					}
 
 					// Add comments
-					const commentLines = Comment.getLines(comment, labelLine);
+					const commentLines=Comment.getLines(comment, labelLine, this.disableCommentsInDisassembly);
 					lines.push(...commentLines);
 				}
 
@@ -2159,13 +2219,13 @@ export class Disassembler extends EventEmitter {
 				// If not done before, add comments
 				if(!comment || addrLabel) {
 					// main comment already added or no comment present
-					if(commentText && commentText.length > 0)
+					if (!this.disableCommentsInDisassembly && commentText && commentText.length > 0)
 						line += '\t; ' + commentText;
 					lines.push(line);
 				}
 				else {
 					// Add comments
-					const commentLines = Comment.getLines(comment, line);
+					const commentLines=Comment.getLines(comment, line, this.disableCommentsInDisassembly);
 					lines.push(...commentLines);
 				}
 
@@ -2175,7 +2235,7 @@ export class Disassembler extends EventEmitter {
 				// Check if the next address is not assigned and put out a comment
 				let attrEnd = this.memory.getAttributeAt(address);
 				if(address < 0x10000) {
-					if(!(attrEnd & MemAttribute.ASSIGNED)) {
+					if (!this.disableCommentsInDisassembly && !(attrEnd & MemAttribute.ASSIGNED)) {
 						lines.push('; ...');
 						lines.push('; ...');
 						lines.push('; ...');
@@ -2254,18 +2314,77 @@ export class Disassembler extends EventEmitter {
 
 
 	/**
+	 * Creates a reverted map from the this.labels map (<address, DisLabel>).
+	 * The created map consists of key-value pairs <name,address>
+	 * and is stored in this.revertedLabelMap.
+	 */
+	public createRevertedLabelMap() {
+		this.revertedLabelMap = new Map<string, number>();
+		for(const [address, label] of this.labels) {
+			this.revertedLabelMap.set(label.getName(), address);
+		}
+	}
+
+
+	/**
+	 * Returns a map of chosen addresses, labels for creating the
+	 * dot graph.
+	 */
+	public getGraphLabels(addrString: number|string, chosenLabels?: Map<number, DisLabel>): Map<number, DisLabel> {
+		// Crete new map
+		if(!chosenLabels)
+			 chosenLabels = new Map<number, DisLabel>();
+
+		// Convert to number
+		let addr;
+		if(typeof(addrString) == 'string') {
+			addr = this.revertedLabelMap.get(addrString);
+			if(!addr)
+				throw Error('Could not find "' + addrString + '" while creating graph.');
+		}
+		else {
+			// Number
+			addr = addrString;
+		}
+		// Now get label
+		const label = this.labels.get(addr);
+		if(!label)
+			throw Error('Could not find address for "' + addrString + '" while creating graph.');
+
+        // Check if already in map
+        if(!chosenLabels.get(addr)) {
+			// Save in new map
+			chosenLabels.set(addr, label);
+			// Also add the called sub routines
+			for(const called of label.calls) {
+				// Recursive
+				const callee = called.getName();
+				this.getGraphLabels(callee, chosenLabels);
+			}
+		}
+
+		// Return
+		return chosenLabels;
+	}
+
+
+	/**
 	 * Returns the labels call graph in dot syntax.
 	 * Every main labels represents a bubble.
 	 * Arrows from one bubble to the other represents
 	 * calling the function.
+	 * Call 'createRevertedLabelMap' before calling this function.
+	 * @param labels The labels to print.
 	 * @param name The name of the graph.
+	 * @returns The dot graphic as text.
 	 */
-	public getCallGraph(name: string): string {
+	public getCallGraph(labels: Map<number,DisLabel>): string {
 		const rankSame1 = new Array<string>();
 		const rankSame2 = new Array<string>();
 
 		// header
-		let text = 'digraph ' + name + '\n{\n';
+		let text = 'digraph Callgraph {\n\n';
+		text += this.dotFormatString + '\n';
 
 		// Calculate size (font size) max and min
 		const fontSizeMin = 13;
@@ -2273,13 +2392,11 @@ export class Disassembler extends EventEmitter {
 		//const min = this.statisticsMin.sizeInBytes;
 		//const fontSizeFactor = (fontSizeMax-fontSizeMin) / (this.statisticsMax.sizeInBytes-min);
 		const min = this.statisticsMin.CyclomaticComplexity;
-		const fontSizeFactor = (fontSizeMax-fontSizeMin) / (this.statisticsMax.CyclomaticComplexity-min);
+		const complDiff = this.statisticsMax.CyclomaticComplexity-min
+		const fontSizeFactor = (fontSizeMax-fontSizeMin) / ((complDiff < 8) ? 8 : complDiff);
 
-		// Iterate through all subroutine labels to assign the text and size
-		// (fontsize) to the nodes (bubbles), also the coloring.
-		// And connect the nodes with arrows.
-		for(let [address, label] of this.labels) {
-
+		// Loop
+		for(const [address, label] of labels) {
 			const type = label.type;
 			if(type != NumberType.CODE_SUB
 				&& type != NumberType.CODE_LBL
@@ -2289,6 +2406,10 @@ export class Disassembler extends EventEmitter {
 
 			// Handle fill color (highlights)
 			let colorString = this.dotMarkedLabels.get(address);
+			if(!colorString) {
+				// Now try also the label name
+				colorString = this.dotMarkedLabels.get(label.getName());
+			}
 
 			// Skip other labels
 			if(label.isEqu) {
@@ -2302,17 +2423,15 @@ export class Disassembler extends EventEmitter {
 			else {
 				// A normal label.
 				// Size
-				const stats = this.subroutineStatistics.get(label);
+				const stats = this.subroutineStatistics.get(label)!;
 				assert(stats);
-				if(!stats)
-					continue;	// calm transpiler
 				const fontSize = fontSizeMin + fontSizeFactor*(stats.CyclomaticComplexity-min);
 
 				// Output
-				text += label.name + ' [fontsize="' + Math.round(fontSize) + '"];\n';
+				text += '"' + label.name + '" [fontsize="' + Math.round(fontSize) + '"];\n';
 				const nodeName = this.nodeFormat(label.name, label.id, address, stats.CyclomaticComplexity, stats.sizeInBytes, stats.countOfInstructions);
-				text += label.name + ' [label="' + nodeName + '"];\n';
-				//text += label.name + ' [label="' + label.name + '\\nID=' + label.id + '\\nCC=' + stats.CyclomaticComplexity + '\\n"];\n';
+				text += '"' + label.name + '" [label="' + nodeName + '"];\n';
+				//text += '"' + label.name + '" [label="' + label.name + '\\nID=' + label.id + '\\nCC=' + stats.CyclomaticComplexity + '\\n"];\n';
 
 				// List each callee only once
 				const callees = new Set<DisLabel>();
@@ -2331,18 +2450,20 @@ export class Disassembler extends EventEmitter {
 				}
 
 				if(callees.size > 0)
-					text += label.name + ' -> { ' + Array.from(callees).map(refLabel => refLabel.name).join(' ') + ' };\n';
+					text += '"' + label.name + '" -> { ' + Array.from(callees).map(refLabel => '"'+refLabel.name+'"').join(' ') + ' };\n';
 			}
 
 			// Color
 			if(colorString)
-				text += label.name + ' [fillcolor=' + colorString + ', style=filled];\n';
+				text += '"' + label.name + '" [fillcolor=' + colorString + ', style=filled];\n';
 		}
 
 		// Do some ranking.
 		// All labels without callers are ranked at the same level.
-		text += '\n{ rank=same; ' + rankSame1.join(', ') + ' };\n\n';
-		text += '\n{ rank=same; ' + rankSame2.join(', ') + ' };\n\n';
+		if(rankSame1.length > 0)
+			text += '\n{ rank=same; "' + rankSame1.join('", "') + '" };\n\n';
+		if(rankSame2.length > 0)
+			text += '\n{ rank=same; "' + rankSame2.join('", "') + '" };\n\n';
 
 		// ending
 		text += '}\n';
@@ -2363,7 +2484,7 @@ export class Disassembler extends EventEmitter {
 	 */
 	protected nodeFormat(labelName: string, labelId: number, address: number, cc?: number, size?: number, instructions?: number): string {
 		// Check if formatting is correct
-		let text = this.dotFormat;
+		let text = this.nodeFormatString;
 		try {
 			text = text.replace(/\${label}/g, labelName);
 			text = text.replace(/\${id}/g, labelId.toString());
@@ -2384,7 +2505,7 @@ export class Disassembler extends EventEmitter {
 	 * @param addr The address (node) to highlight.
 	 * @param colorString The color used for highlighting. E.g. "yellow".
 	 */
-	public setDotHighlightAddress(addr: number, colorString: string) {
+	public setDotHighlightAddress(addr: number|string, colorString: string) {
 		this.dotMarkedLabels.set(addr, colorString);
 	}
 
@@ -2404,9 +2525,12 @@ export class Disassembler extends EventEmitter {
 		for(const startAddress of startAddresses) {
 			// Start
 			const label = this.labels.get(startAddress);
-			let name = (label) ? label.name+'\\l' : '';
 			const addressString = Format.getHexString(startAddress,4);
-			name += (label) ? '[0x' + addressString + ']' + '\\l' : '0x' + addressString + '\\l' ;
+			let name;
+			if(label)
+				name = label.name;
+			if(!name)
+				name += '0x' + addressString;
 			const start = 'b' + addressString + 'start';
 			text += start + ' [label="' + name + '", fillcolor=lightgray, style=filled, shape=tab];\n';
 			text += start + ' -> b' + Format.getHexString(startAddress,4) + ';\n';
@@ -2478,7 +2602,7 @@ export class Disassembler extends EventEmitter {
 			// Check if outside
 			if(addrsArray.indexOf(branchAddress) >= 0) {
 				// Inside
-				text += branch + ' -> b' + Format.getHexString(branchAddress,4) + ' [headport="n", tailport="r"];\n';
+				text += branch + ' -> b' + Format.getHexString(branchAddress,4) + ' [headport="n", tailport="e"];\n';
 				// Check if already disassembled
 				if(processedAddrsArray.indexOf(branchAddress) < 0) {
 					// No, so disassemble

@@ -3,107 +3,121 @@
 ## Overview
 
 ~~~
-                                                          ┌───┐
-                                                          │   │
-┌───────────────────┐              ┌─────────────────┐    │ S │   ┌────────────────────┐
-│                   │   Request    │                 │    │ o │   │Emulator            │
-│                   │─────────────▶│       z80       │────┼─c─┼──▶│   ┌────────────────┴───┐
-│      vscode       │              │      debug      │    │ k │   │   │MAME                │
-│                   │◀─────────────│     adapter     │◀───┼─e─┼───│   │   ┌────────────────┴──┐
-│                   │  Response    │                 │    │ t │   │   │   │ZEsarUX            │
-└───────────────────┘              └─────────────────┘    │   │   └───┤   │                   │
-                                                          └───┘       │   │                   │
-                                                                      └───┤                   │
-                                                                          │                   │
-                                                                          └───────────────────┘
+                                                               ┌────────────────────┐
+                                                       ┌───┐   │Remote              │
+                                                       │   │   │   ┌────────────────┴───┐
+┌────────────────┐              ┌─────────────────┐    │ S │   │   │MAME                │
+│                │   Request    │                 │    │ o │   │   │   ┌────────────────┴──┐
+│                │─────────────▶│                 │────┼─c─┼──▶│   │   │ZEsarUX            │
+│                │              │                 │    │ k │   └───┤   │   ┌───────────────┴───┐
+│                │              │                 │◀───┼─e─┼───    │   │   │CSpect             │
+│                │              │                 │    │ t │       └───┤   │                   │
+│                │              │                 │    │   │           │   │                   │
+│                │   Response   │      DeZog      │    └───┘           └───┤                   │
+│     vscode     │◀─────────────│  Debug Adapter  │    ┌───┐               │                   │
+│                │              │                 │    │ / │               └───────────────────┘
+│                │              │                 │    │ d │                     ┌────────────────────┐
+│                │              │                 │    │ e │    ┌──────────┐     │      ZX Next       │
+│                │              │                 │────┼─v─┼────┤USB/Serial├────▶├────┐(ZXNextHW)     │
+│                │              │                 │    │ / │    │Converter │     │UART│               │
+│                │              │                 │◀───┼─t─┼────┤          ├─────├────┘               │
+│                │              │                 │    │ t │    └──────────┘     │                    │
+└────────────────┘              └─────────────────┘    │ y │                     └────────────────────┘
+                                                       └───┘
 ~~~~
 
 ## Main Classes
 
-
-- DebugAdapter: Just runs Z80Debug.
+- DebugSessionClass: Just runs DeZog. I s the main class to communicate with vscode.
 - Extension: The extension class. Activates the extension and registers commands.
 - Frame: Represents a Z80 StackObject, i.e. caller address and objects on stack.
 - Labels: Singleton which reads the .list and .labels file and associates addresses, labels, filenames and line numbers.
 - Settings: Singleton to hold the extension's settings.
 - ShallowVar: DisassemblyVar, RegistersMainVar, RegistersSecondaryVar, StackVar, LabelVar. Representations of variables. They know how to retrieve the data from zesarux.
 - Z80Registers: Static class to parse (from zesarux) and format registers.
-- StateZ80: Class to get and set the complete machine state.
-- Emulator: Gets requests from vscode and passes them to zesarux (via ZesaruxSocket).
+- Remote: Gets requests from the DebugSessionClass and passes them to e.g. ZEsarUX (via ZesaruxSocket). There are several Remote classes e.g. Zesaruxremote or ZxSimulatorRemote.
 - ZesaruxSocket: Socket connection and communication to zesarux emulator. Knows about the basic communication, but not the commands.
 
 
 Helper classes:
-- CallSerializer: Used to queue/serialize function calls from vscode and to the socket.
 - Log: Used for logging. Adds the caller and break time to the logs.
 - RefList: List to associate variable references to objects.
+- MemBuffer: Used for serialization.
+- Utility: Misc functions. E.g. for formatting.
 
 ~~~
-┌─────────┐      ┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐     ┌─────────────────┐
-│         │      │                                                                                                     │     │Helper           │
-│         │      │                                            DebugAdapter                                             │     │                 │
-│         │      │                                                                                                     │     │                 │
-│         │      └─────────────────────────────────────────────────────────────────────────────────────────────────────┘     │┌─────────┐      │
-│         │         ▲                         ▲                          ▲                                 ▲                 ││Utility  │      │
-│         │         │                         │                          │                                 │                 │└─────────┘      │
-│Settings │         ▼                         │                          ▼                                 ▼                 │                 │
-│         │    ┌───────────────┐              ▼               ┌────────────────────┐             ┌──────────────────────┐    │┌──────────────┐ │
-│         │    │TextView       │         ┌─────────┐          │Emulator            │             │Variables             │    ││CallSerializer│ │
-│         │    │ ┌─────────────┴─┐       │         │          │  ┌─────────────────┴──┐          │┌───────────┐         │    │└──────────────┘ │
-│         │    │ │MemoryDumpView │       │ Labels  │◀────────▶│  │ZesaruxEmulator     │          ││ShallowVar │         │    │                 │
-│         │    │ │ ┌─────────────┴─┐     │         │  ┌──────▶│  │  ┌─────────────────┴──┐       │└───────────┘         │    │┌─────────┐      │
-│         │    │ │ │MemoryReg.View │     └─────────┘  │       │  │  │ZesaruxExtEmulator  │       │┌────────────────┐    │    ││RefList  │      │
-└─────────┘    │ │ │ ┌─────────────┴─┐        ▲       │       │  │  │  ┌─────────────────┴──┐    ││DisassemblyVar  │    │    │└─────────┘      │
-               └─┤ │ │ZxN.SpritesView│        │       │       └──┤  │  │MameEmulator        │    │└────────────────┘    │    │                 │
-                 │ │ │               │        ▼       │          │  │  │                    │    │┌────────────────┐    │    │┌────┐           │
-                 └─┤ │               │  ┌ ─ ─ ─ ─ ─ ┐ │          └──┤  │                    │    ││RegisterMainVar │    │    ││Log │           │
-                   │ │               │      Files     │             │  │                    │    │└────────────────┘    │    │└────┘           │
-                   └─┤               │  └ ─ ─ ─ ─ ─ ┘ │             └──┤                    │    │┌────────────────────┐│    │                 │
-                     │               │                │            ▲   │                    │    ││RegisterSecondaryVar││    │                 │
-                     └───────────────┘                │            │   └────────────────────┘    │└────────────────────┘│    │                 │
-                        ▲                             │            ▼            ▲        ▲       │┌──────────┐          │    │                 │
-                        │                             │  ┌──────────────┐       │        │       ││StackVar  │          │    │                 │
-                        └─────────────────────────────┘  │              │       ▼        │       │└──────────┘          │    │                 │
-                                                         │ Z80Registers │  ┌──────────┐  │       │┌──────────┐          │    │                 │
-                                                         │              │  │ StateZ80 │  │       ││LabelVar  │          │    │                 │
-                                                         └──────────────┘  └──────────┘  │       │└──────────┘          │    │                 │
-                                                                   ▲            ▲        │       └──────────────────────┘    └─────────────────┘
-                                                                   │            │        │                  ▲
-                                                                   │            │        │                  │
-                                                                   ▼            ▼        ▼                  ▼
-                                                              ┌─────────────────────────────────────────────────────────┐
-                                                              │Sockets ┌──────────────┐       ┌───────────────┐         │
-                                                              │        │  MameSocket  │       │ ZesaruxSocket │         │
-                                                              │        └──────────────┘       └───────────────┘         │
-                                                              └─────────────────────────────────────────────────────────┘
-~~~~
+┌─────────┐      ┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐        ┌──────────────────┐
+│         │      │                                                                                                        │        │Helper            │
+│         │      │                                           DebugSessionClass                                            │        │                  │
+│         │      │                                                                                                        │        │                  │
+│         │      └────────────────────────────────────────────────────────────────────────────────────────────────────────┘        │┌─────────┐       │
+│         │         ▲                         ▲                          ▲                                       ▲                 ││Utility  │       │
+│         │         │                         │                          │                                       │                 │└─────────┘       │
+│Settings │         ▼                         │                          ▼                                       ▼                 │                  │
+│         │    ┌───────────────┐              ▼               ┌────────────────────┐                   ┌──────────────────────┐    │┌─────────┐       │
+│         │    │TextView       │         ┌─────────┐          │RemoteBase          │                   │Variables             │    ││RefList  │       │
+│         │    │ ┌─────────────┴─┐       │         │          │  ┌─────────────────┴──┐                │┌───────────┐         │    │└─────────┘       │
+│         │    │ │MemoryDumpView │       │ Labels  │◀────────▶│  │ZesaruxRemote       │                ││ShallowVar │         │    │                  │
+│         │    │ │ ┌─────────────┴─┐     │         │  ┌──────▶│  │  ┌─────────────────┴──┐             │└───────────┘         │    │┌─────────┐       │
+│         │    │ │ │MemoryReg.View │     └─────────┘  │       │  │  │ZesaruxExtRemote    │             │┌────────────────┐    │    ││MemBuffer│       │
+└─────────┘    │ │ │ ┌─────────────┴─┐        ▲       │       │  │  │  ┌─────────────────┴──┐     ◀──▶ ││DisassemblyVar  │    │    │└─────────┘       │
+               └─┤ │ │ZxN.SpritesView│        │       │       └──┤  │  │MameRemote          │          │└────────────────┘    │    │                  │
+                 │ │ │               │        ▼       │          │  │  │  ┌─────────────────┴──┐       │┌────────────────┐    │    │┌────────────────┐│
+                 └─┤ │               │  ┌ ─ ─ ─ ─ ─ ┐ │          └──┤  │  │CSpectRemote        │       ││MemorySlotsVar  │    │    ││DisassemblyClass││
+                   │ │               │      Files     │             │  │  │  ┌─────────────────┴──┐    │└────────────────┘    │    │└────────────────┘│
+                   └─┤               │  └ ─ ─ ─ ─ ─ ┘ │             └──┤  │  │ZXNextRemote        │    │┌────────────────┐    │    │                  │
+                     │               │                │                │  │  │  ┌─────────────────┴──┐ ││RegisterMainVar │    │    │┌────┐            │
+                     └───────────────┘                │                └──┤  │  │ZxSimulatorRemote   │ │└────────────────┘    │    ││Log │            │
+                        ▲                             │                   │  │  │                    │ │┌────────────────────┐│    │└────┘            │
+                        │                             │                   └──┤  │                    │ ││RegisterSecondaryVar││    │                  │
+                        └─────────────────────────────┘            ▲         │  │                    │ │└────────────────────┘│    │                  │
+                                                                   │         └──┤                    │ │┌──────────┐          │    └──────────────────┘
+                                                                   │            │                    │ ││StackVar  │          │
+                                                                   ▼            └────────────────────┘ │└──────────┘          │
+                                                          ┌────────────────┐            ▲              │┌──────────┐          │
+                                                          │                │            │              ││LabelVar  │          │
+                                                          │  Z80Registers  │            │              │└──────────┘          │
+                                                          │                │            │              └──────────────────────┘
+                                                          └────────────────┘            │
+                                                                   ▲                    │
+                                                                   │                    │
+                                                                   │                    │
+                                                                   ▼                    ▼
+                                                        ┌──────────────────────────────────────────────────────────────────────────┐
+                                                        │Transport (sockets/file)                                                  │
+                                                        │         ┌──────────┐ ┌───────────────┐ ┌────────────┐ ┌───────────────┐  │
+                                                        │         │MameSocket│ │ ZesaruxSocket │ │CSpectSocket│ │ ZxNextSerial  │  │
+                                                        │         └──────────┘ └───────────────┘ └────────────┘ └───────────────┘  │
+                                                        │                                                                          │
+                                                        └──────────────────────────────────────────────────────────────────────────┘
+~~~
 
 
 Communication:
 
-DebugAdapter <-> Emulator:
-DebugAdapter takes care of association of vscode references and objects.
+DebugSessionClass <-> Remote:
+DebugSessionClass takes care of association of vscode references and objects.
 - Commands: step-over, step-into, step-out
 - Data: Frames (call stack), Registers/Frame, expressions, breakpoints, Labels.
 
-Emulator <-> Socket:
+Remote <-> Socket:
 - Commands: run, step-over, step-into, step-out, breakpoints
 - Data: registers, memory dump, call stack
 
 
 
-## Asynchronicity
+## Activation
 
-vscode is highly asynchronous. All requests start with the 'request' and end with a 'response'. The 'response' would be typically generated in another function e.g. as a response from the zesarux socket answer.
-Meanwhile vscode could have sent another request either for the same
-(see stackTraceRequest) or for something else.
+DeZog is activated in the 'activate' function in extension.ts by registering the ZesaruxConfigurationProvider.
+This happens e.g. when the Debugger is started.
+Short after 'ZesaruxConfigurationProvider::resolveDebugConfiguration' is called.
+As the debug adapter is entirely implemented in Typescript it lives in the same process as the extension which simplifies debugging the debug-adapter.
+So in 'resolveDebugConfiguration' the 'ZesaruxDebugSession' is instantiated
+and started as server (socket). In the same function the server (socket) is also connected by the extension.
 
-Since this debug adapter has to maintain a reference/object map/list it is
-necessary to reset this list sometimes (to free the objects).
-This list is global whcih leads to asynchronicity problems.
+Although the same process is used and therefore it is technically possible to directly call methods of the 'ZesaruxDebugSession' it is not done.
+Instead the intended way (through 'customRequest' which uses sockets) is chosen.
 
-Therefore all requests (next, scopesRequest, stackTraceRequest, variablesRequest etc.) from vscode are added to a queue the so-called
-CallSerializer (this.serializer). So that they are executed and responded to in exactly the order they come in.
 
 
 ## Showing variables, call stacks etc.
@@ -196,7 +210,7 @@ Examples:
 If the variable is opened in the WATCH area a variable request is done for that ID. The corresponding object's function is executed and the data is retrieved and returned in the response.
 
 
-# Problems / Decisions needed
+# Problems / Decisions needed (old unsolved, but not so important)
 
 vscode is highly asynchronous. All requests start with the 'request' and end with a 'response'. The 'response' would be typically generated in another function e.g. as a response from the zesarux socket answer.
 Meanwhile vscode could have sent another request either for the same
@@ -233,10 +247,10 @@ hide footbox
 title Step
 actor User
 User -> vscode: Step
-vscode -> EmulDebugAdapter: stepXxxRequest
-EmulDebugAdapter -> MemoryDumpView: update
-MemoryDumpView -> Emulator: getMemoryDump(s)
-MemoryDumpView <-- Emulator: Data
+vscode -> DebugSessionClass: stepXxxRequest
+DebugSessionClass -> MemoryDumpView: update
+MemoryDumpView -> Remote: getMemoryDump(s)
+MemoryDumpView <-- Remote: Data
 note over MemoryDumpView: create html+js
 MemoryDumpView -> webView: Set webview.html
 ```
@@ -257,7 +271,7 @@ actor User
 User -> webView: DoubleClick
 webView -> MemoryDumpView: valueChanged
 MemoryDumpView -> MemoryDumpView: changeMemory
-MemoryDumpView -> Emulator: writeMemory
+MemoryDumpView -> Remote: writeMemory
 webView <- MemoryDumpView: changeValue
 ```
 
@@ -269,22 +283,22 @@ hide footbox
 title Step
 actor User
 User -> vscode: Step
-vscode -> EmulDebugAdapter: stepXxxRequest
-EmulDebugAdapter -> ZXNextSpritesView: update
+vscode -> DebugSessionClass: stepXxxRequest
+DebugSessionClass -> ZXNextSpritesView: update
 ZXNextSpritesView -> ZXNextSpritesView: getSprites
-ZXNextSpritesView -> Emulator: getTbblueSprite(s)
-ZXNextSpritesView <-- Emulator: Data
+ZXNextSpritesView -> Remote: getTbblueSprite(s)
+ZXNextSpritesView <-- Remote: Data
 alt palette empty
     ZXNextSpritesView -> ZXNextSpritesView: getSpritePalette
-    ZXNextSpritesView -> Emulator: getTbblueRegister(whichPaletteXXX)
-    ZXNextSpritesView <-- Emulator: Used palette
-    ZXNextSpritesView -> Emulator: getTbbluePalette
-    ZXNextSpritesView <-- Emulator: Data
+    ZXNextSpritesView -> Remote: getTbblueRegister(whichPaletteXXX)
+    ZXNextSpritesView <-- Remote: Used palette
+    ZXNextSpritesView -> Remote: getTbbluePalette
+    ZXNextSpritesView <-- Remote: Data
 end
 alt patterns empty
     ZXNextSpritesView -> ZXNextSpritesView: getSpritePatterns
-    ZXNextSpritesView -> Emulator: getTbbluePattern(s)
-    ZXNextSpritesView <-- Emulator: Data
+    ZXNextSpritesView -> Remote: getTbbluePattern(s)
+    ZXNextSpritesView <-- Remote: Data
 end
 note over ZXNextSpritesView: create html+js
 ZXNextSpritesView -> webView: Set webview.html
@@ -297,16 +311,163 @@ actor User
 User -> webView: Click "Reload"
 
 webView -> ZXNextSpritesView: getSpritePalette
-    ZXNextSpritesView -> Emulator: getTbblueRegister(whichPaletteXXX)
-    ZXNextSpritesView <-- Emulator: Used palette
-    ZXNextSpritesView -> Emulator: getTbbluePalette
-    ZXNextSpritesView <-- Emulator: Data
+    ZXNextSpritesView -> Remote: getTbblueRegister(whichPaletteXXX)
+    ZXNextSpritesView <-- Remote: Used palette
+    ZXNextSpritesView -> Remote: getTbbluePalette
+    ZXNextSpritesView <-- Remote: Data
 
 webView -> ZXNextSpritesView: getSpritePatterns
-    ZXNextSpritesView -> Emulator: getTbbluePattern(s)
-    ZXNextSpritesView <-- Emulator: Data
+    ZXNextSpritesView -> Remote: getTbbluePattern(s)
+    ZXNextSpritesView <-- Remote: Data
 
 note over ZXNextSpritesView: create html+js
 ZXNextSpritesView -> webView: Set webview.html
 ```
+
+
+## Stopping the Emulator Debug Session
+
+There are several reasons to stop the Emulator Debug Session.
+- User pressed 'stop' button
+- Connection error/connection closed by emulator (zesarux)
+- Unit tests stop the emulator
+
+
+```puml
+hide footbox
+title User initiated
+actor user
+participant vscode
+participant "Emul\nDebug\nSession" as session
+participant "Remote" as emul
+participant "Socket" as socket
+participant "ZEsarUX" as zesarux
+
+user -> vscode: Pressed stop button
+vscode -> session: disconnectRequest
+session -> emul: disconnect
+emul -> socket: quit
+note over socket: removeAllListeners
+note over socket: install new listeners\n(close, end, ...)
+
+socket -> zesarux: cpu-code-coverage enabled yes
+socket <-- zesarux
+socket -> zesarux: cpu-history enabled yes
+socket <-- zesarux
+socket -> zesarux: clear-membreakpoints
+socket <-- zesarux
+socket -> zesarux: disable-breakpoints
+socket <-- zesarux
+socket -> zesarux: quit
+socket <-- zesarux
+note over socket: close socket
+note over socket: removeAllListeners
+emul <-- socket
+
+session <-- emul
+note over session: removeAllListeners
+vscode <-- session: response
+```
+
+
+```puml
+hide footbox
+title Error
+'actor user
+participant vscode
+participant "Emul\nDebug\nSession" as session
+participant "Remote" as emul
+participant "Socket" as socket
+'participant "ZEsarUX" as zesarux
+
+emul <-- socket: 'error'/'close'/'end'
+session <-- emul: 'error'
+
+session -> session: terminate
+note over session: removeAllListeners
+vscode <-- session: TerminatedEvent
+
+vscode -> session: disconnectRequest
+session -> emul: disconnect
+emul -> socket: quit
+note over socket: ...
+emul <-- socket
+
+session <-- emul
+note over session: removeAllListeners
+vscode <-- session: response
+```
+
+
+```puml
+hide footbox
+title User started unit tests
+actor user
+participant Z80UnitTests as unittest
+participant vscode
+participant "Emul\nDebug\nSession" as session
+participant "Remote" as emul
+participant "Socket" as socket
+'participant "ZEsarUX" as zesarux
+
+user -> unittest: start unit tests
+unittest -> emul: terminate
+
+session <-- emul: 'terminated'
+session -> session: terminate
+
+emul -> socket: quit
+note over socket: ...
+emul <-- socket
+
+note over session: removeAllListeners
+vscode <-- session: TerminatedEvent
+
+alt If debug session active
+
+vscode -> session: disconnectRequest
+session -> emul: disconnect
+emul -> socket: quit
+'note over socket: ...
+emul <-- socket
+
+session <-- emul
+note over session: removeAllListeners
+vscode <-- session: response
+
+end
+
+note over unittest: Wait until debug session\nnot active anymore
+note over unittest: Start unit tests
+
+```
+
+
+
+## Code Coverage
+
+Code coverage can be enabled in the launch settings.
+Everytime the program is stopped the "Remote" will send information about the executed addresses.
+DeZog will then highlight the covered lines.
+This is available everywhere (e.g. during debugging or during execution of unit tests).
+
+xxx is either the DebugSessionClass or the Z80UnitTests.
+
+```puml
+hide footbox
+title Coverage new
+participant xxx
+Remote -> ZEsarUX: cpu-code-coverage enabled yes
+...
+xxx -> Remote: Step/Continue
+Remote -> ZEsarUX: cpu-step/run
+note over ZEsarUX: stopped
+Remote <-- ZEsarUX
+Remote -> ZEsarUX: cpu-code-coverage get
+Remote <-- ZEsarUX: Executed addresses
+xxx <-- Remote: Event: 'coverage'
+note over xxx: Convert addresses to\nsource file locations.
+```
+
+
 

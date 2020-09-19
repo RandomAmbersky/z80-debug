@@ -2,7 +2,6 @@
 //import * as fs from 'fs';
 import { writeFileSync, appendFileSync } from 'fs';
 import * as util from 'util';
-import * as vscode from 'vscode';
 
 
 // If there is a pause of 2 seconds between logs then an additional indication is logged.
@@ -20,7 +19,9 @@ export class Log {
 	protected outFilePath: string|undefined;
 
 	/// Output logging to the "OUTPUT" tab in vscode.
-	protected logOutput: vscode.OutputChannel|undefined;
+	/// This is of type vscode.OutputChannel. But it can be used as it would imply a
+	/// dependency to vscode. And with a dependency to vscode mocha unit tests are not possible.
+	protected logOutput;
 
 	/// Last time a log has been written.
 	protected lastLogTime = Date.now();
@@ -30,12 +31,12 @@ export class Log {
 	protected callerNameIndex = -1;
 
 	/**
-	 * Initializes the loggine. I.e. enables/disables logging to
+	 * Initializes the logging. I.e. enables/disables logging to
 	 * vscode channel and file.
-	 * @param channelOutput If defined the name of the channel output.
+	 * @param channelOutput vscode.OutputChannel. If defined the name of the channel output.
 	 * @param filePath If set: log additionally to a file. Relative file path.
 	 */
-	public static init(channelOutput: string|undefined, filePath: string|undefined) {
+	public static init(channelOutput: any, filePath: string|undefined) {
 		LogGlobal.init(channelOutput, filePath);
 		LogGlobal.callerNameIndex++;
 	}
@@ -71,13 +72,15 @@ export class Log {
 	/**
 	 * Initializes the logging. I.e. enables/disables logging to
 	 * vscode channel and file.
-	 * @param channelOutput If defined the name of the channel output.
+	 * @param channelOutput vscode.OutputChannel. If defined the name of the channel output.
 	 * @param filePath If set: log additionally to a file. Relative file path.
 	 * @param callerName If true the name of the calling method is shown.
 	 */
-	public init(channelOutput: string|undefined, filePath: string|undefined, callerName = true) {
+	public init(channelOutput: any, filePath: string|undefined, callerName = true) {
+		if(this.logOutput)
+			this.logOutput.dispose();
 		this.outFilePath = filePath;
-		this.logOutput = (channelOutput) ? vscode.window.createOutputChannel(channelOutput) : undefined;
+		this.logOutput = channelOutput;
 		if(callerName)
 			this.callerNameIndex = 3;
 	}
@@ -138,15 +141,25 @@ export class Log {
 	protected write(format: string, ...args) {
 		var text = util.format(format, ...args);
 		try {
-			// write to console
-			if(this.logOutput)
-				this.logOutput.appendLine(text);
-			// Append to file
-			if(this.outFilePath)
-				appendFileSync(this.outFilePath, text + '\n');
+			// write
+			this.appendLine(text);
 		}
 		catch(e) {
 		}
+	}
+
+
+	/**
+	 * Simply outputs text.
+	 * @param text The text plus a newline is printed.
+	 */
+	public appendLine(text: string) {
+		// write to console
+		if(this.logOutput)
+			this.logOutput.appendLine(text);
+		// Append to file
+		if(this.outFilePath)
+			appendFileSync(this.outFilePath, text + '\n');
 	}
 
 
@@ -155,6 +168,9 @@ export class Log {
 	 * @returns 'class.method'. E.g. "ZesaruxDebugSession.initializeRequest:"
 	 */
 	protected callerName(): string {
+		// Diabled
+		return '';
+
 		// Check if caller name is configured
 		if(this.callerNameIndex < 0)
 			return '';
@@ -179,3 +195,8 @@ export class Log {
 /// Global logging is instantiated.
 export let LogGlobal = new Log();
 
+/// Socket logging.
+export let LogSocket = new Log();
+
+// Special socket logging
+export let LogSocketCommands: Log;

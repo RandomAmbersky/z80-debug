@@ -2,11 +2,10 @@
 node_modules/
 out/
 npm-debug.log
-z80-debug.txt
-*.vsix
+/*.vsix
 logs/
-data/
+/data/
 .vscode/
 notes.md
-coverage/
+/coverage/
 

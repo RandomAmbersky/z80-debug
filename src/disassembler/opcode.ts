@@ -197,6 +197,11 @@ export class Opcode {
 			const jumpAddress = this.code & 0b00111000;
 			this.value = jumpAddress;
 		}
+		else if(name.startsWith("JP")) {	// "JP (HL)", "JP (IXY)" or "JP (C)"
+			// Note: we don't set a branch address because we don't know where it jumps to: this.flags |= OpcodeFlag.BRANCH_ADDRESS;
+			// But it is a stop code.
+			this.flags |= OpcodeFlag.STOP;
+		}
 
 		// Store
 		this.name = name;
@@ -566,6 +571,15 @@ class OpcodeNext extends Opcode {
 }
 
 
+/// Push nn must be derived because the nn is big endian.
+class OpcodeNextPush extends OpcodeNext {
+	constructor(code: number, name: string) {
+		super(code, name);
+		this.valueType = NumberType.NUMBER_WORD_BIG_ENDIAN;
+	}
+}
+
+
 /**
  * Special opcode to decode the next register
  */
@@ -720,7 +734,7 @@ class OpcodeNext_nextreg_n_n extends OpcodeNext_nextreg_n_a {
 				break;
 
 			case 1: // REG_VERSION
-				valuename = Format.getHexString(regValue,2) + 'h (v'; + (regValue>>4) + '.' + (regValue&0x0f) + ')';
+				valuename = Format.getHexString(regValue,2) + 'h (v' + (regValue>>>4) + '.' + (regValue&0x0f) + ')';
 				break;
 
 			case 2: // REG_RESET
@@ -741,7 +755,7 @@ class OpcodeNext_nextreg_n_n extends OpcodeNext_nextreg_n_a {
 				arr = new Array<string>();
 				if(regValue & 0x80)
 					arr.push("lock timing");
-				switch((regValue>>4) & 0x07) {
+				switch((regValue>>>4) & 0x07) {
 					case 0b000:
 					case 0b001:	arr.push("Timing:ZX 48K"); break;
 					case 0b010: arr.push("Timing:ZX 128K"); break;
@@ -1132,14 +1146,14 @@ export const Opcodes: Array<Opcode> = [
 	new Opcode(0x8D, "ADC A,L"),
 	new Opcode(0x8E, "ADC A,(HL)"),
 	new Opcode(0x8F, "ADC A,A"),
-	new Opcode(0x90, "SUB A,B"),
-	new Opcode(0x91, "SUB A,C"),
-	new Opcode(0x92, "SUB A,D"),
-	new Opcode(0x93, "SUB A,E"),
-	new Opcode(0x94, "SUB A,H"),
-	new Opcode(0x95, "SUB A,L"),
-	new Opcode(0x96, "SUB A,(HL)"),
-	new Opcode(0x97, "SUB A,A"),
+	new Opcode(0x90, "SUB B"),
+	new Opcode(0x91, "SUB C"),
+	new Opcode(0x92, "SUB D"),
+	new Opcode(0x93, "SUB E"),
+	new Opcode(0x94, "SUB H"),
+	new Opcode(0x95, "SUB L"),
+	new Opcode(0x96, "SUB (HL)"),
+	new Opcode(0x97, "SUB A"),
 	new Opcode(0x98, "SBC A,B"),
 	new Opcode(0x99, "SBC A,C"),
 	new Opcode(0x9A, "SBC A,D"),
@@ -1202,7 +1216,7 @@ export const Opcodes: Array<Opcode> = [
 	new Opcode(0xD3, "OUT (#n),A"),
 	new Opcode(0xD4, "CALL NC,#nn"),
 	new Opcode(0xD5, "PUSH DE"),
-	new Opcode(0xD6, "SUB A,#n"),
+	new Opcode(0xD6, "SUB #n"),
 	new Opcode(0xD7, "RST %s"),
 	new Opcode(0xD8, "RET C"),
 	new Opcode(0xD9, "EXX"),
@@ -1255,7 +1269,13 @@ export const OpcodesED: Array<Opcode> = [
 	...Array<number>(0x02).fill(0).map((value, index) => new OpcodeInvalid(0x25+index)),
 
 	new OpcodeNext(0x27, "TEST #n"),     // ZX Spectrum Next
-	...Array<number>(0x08).fill(0).map((value, index) => new OpcodeInvalid(0x28+index)),
+
+	new OpcodeNext(0x28, "BSLA DE,B"),     // ZX Spectrum Next
+	new OpcodeNext(0x29, "BSRA DE,B"),     // ZX Spectrum Next
+	new OpcodeNext(0x2A, "BSRL DE,B"),     // ZX Spectrum Next
+	new OpcodeNext(0x2B, "BSRF DE,B"),     // ZX Spectrum Next
+	new OpcodeNext(0x2C, "BRLC DE,B"),     // ZX Spectrum Next
+	...Array<number>(0x03).fill(0).map((value, index) => new OpcodeInvalid(0x2D+index)),
 
 	new OpcodeNext(0x30, "MUL D,E"),     // ZX Spectrum Next
 	new OpcodeNext(0x31, "ADD HL,A"),     // ZX Spectrum Next
@@ -1332,7 +1352,7 @@ export const OpcodesED: Array<Opcode> = [
 	new Opcode(0x7F, "[ld r,r?]"),
 	...Array<number>(0x0A).fill(0).map((value, index) => new OpcodeInvalid(0x80+index)),
 
-	new OpcodeNext(0x8A, "PUSH #nn"),     // ZX Spectrum Next
+	new OpcodeNextPush(0x8A, "PUSH #nn"),     // ZX Spectrum Next
 	...Array<number>(0x06).fill(0).map((value, index) => new OpcodeInvalid(0x8B+index)),
 
 	new OpcodeNext_nextreg_n_n(0x91, "NEXTREG #n,#n"),     // ZX Spectrum Next
@@ -1340,7 +1360,10 @@ export const OpcodesED: Array<Opcode> = [
 	new OpcodeNext(0x93, "PIXELDN"),     // ZX Spectrum Next
 	new OpcodeNext(0x94, "PIXELAD"),     // ZX Spectrum Next
 	new OpcodeNext(0x95, "SETAE"),     // ZX Spectrum Next
-	...Array<number>(0x0A).fill(0).map((value, index) => new OpcodeInvalid(0x96+index)),
+	...Array<number>(0x02).fill(0).map((value, index) => new OpcodeInvalid(0x96+index)),
+	new OpcodeNext(0x98, "JP (C)"),     // ZX Spectrum Next
+
+	...Array<number>(0x07).fill(0).map((value, index) => new OpcodeInvalid(0x99+index)),
 
 	new Opcode(0xA0, "LDI"),
 	new Opcode(0xA1, "CPI"),
@@ -1662,9 +1685,13 @@ export const OpcodesDD = Opcodes.map((opcode, index) => {
 	if(nameArray.length > 1) {
 		const last = nameArray.length-1;
 		let name2 = nameArray[last];
-		const match = /\(HL\)/.exec(name2);
+		const nameFirst = nameArray[0];
+		let match;
+		if(nameFirst != "JP")
+			match = /\(HL\)/.exec(name2);
 		if(match) {
-			// something like "LD A,(HL)" becomes "LD A,(IX+n)"
+			// something like "LD A,(HL)" becomes "LD A,(IX+n)",
+			// But not "JP (HL)"
 			name2 = name2.replace('HL', 'IX%s');
 			opcodeDD.valueType = NumberType.RELATIVE_INDEX;
 			opcodeDD.length ++;

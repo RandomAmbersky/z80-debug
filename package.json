@@ -1,38 +1,45 @@
 {
-	"name": "z80-debug",
-	"displayName": "Z80 Debugger",
-	"version": "0.7.0",
+	"name": "dezog",
+	"displayName": "DeZog",
+	"version": "1.4.8",
 	"publisher": "maziac",
-	"description": "A debug adapter for use with the ZEsarUX ZX Spectrum Emulator.",
+	"description": "Visual Studio Code Debug Adapter for the Z80/ZX Spectrum.",
 	"author": {
 		"name": "Thomas Busse"
 	},
 	"license": "MIT",
 	"keywords": [
 		"debugger",
+		"debug",
 		"z80",
+		"z80-debug",
+		"dezog",
 		"zesarux",
-		"zx spectrum"
+		"zx",
+		"spectrum",
+		"assembler",
+		"z80asm",
+		"sjasmplus"
 	],
 	"engines": {
-		"vscode": "^1.30.0",
+		"vscode": "^1.35.1",
 		"node": "^7.9.0"
 	},
-	"icon": "images/z80-debug-icon.png",
+	"icon": "images/dezog-icon.png",
 	"categories": [
 		"Debuggers"
 	],
 	"private": true,
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/maziac/z80-debug"
+		"url": "https://github.com/maziac/DeZog"
 	},
 	"scripts": {
-		"prepublish": "tsc -p ./src",
 		"compile": "tsc -p ./src",
-		"tslint": "tslint ./src/**/*.ts",
+		"tslint": "eslint ./src/**/*.ts",
 		"watch": "tsc -w -p ./src",
 		"test": "mocha -u tdd ./out/tests/",
+		"preinstall": "npx npm-force-resolutions",
 		"postinstall": "node ./node_modules/vscode/bin/install",
 		"package": "vsce package",
 		"publish": "vsce publish"
@@ -42,26 +49,84 @@
 		"await-notify": "1.0.1",
 		"binary-file": "^0.2.1",
 		"gif-writer": "^0.9.3",
-		"mocha": "^5.2.0",
-		"ts-node": "^7.0.1",
-		"vscode": "^1.1.26",
-		"vscode-debugadapter": "1.33.0",
-		"vscode-debugprotocol": "1.33.0"
+		"glob": "^7.1.6",
+		"jsonc-parser": "^2.2.1",
+		"mocha": "^7.1.1",
+		"node-gzip": "^1.1.2",
+		"rng": "^0.2.2",
+		"ts-node": "^8.8.1",
+		"vscode-debugadapter": "^1.39.1",
+		"vscode-debugprotocol": "1.39.0"
 	},
 	"devDependencies": {
-		"@types/mocha": "5.2.5",
-		"@types/node": "10.12.18",
-		"tslint": "5.12.0",
-		"typescript": "3.2.2",
-		"vsce": "1.54.0",
-		"vscode-debugadapter-testsupport": "1.33.0"
+		"@types/mocha": "7.0.2",
+		"@types/node": "13.9.5",
+		"electron-rebuild": "^1.10.1",
+		"minimist": "^1.2.5",
+		"tslint": "^6.1.0",
+		"typescript": "3.8.3",
+		"vsce": "1.74.0",
+		"vscode": "^1.1.36",
+		"vscode-debugadapter-testsupport": "1.40.2"
+	},
+	"resolutions": {
+		"minimist": "^1.2.5"
+	},
+	"bugs": {
+		"url": "https://github.com/maziac/DeZog/issues"
 	},
 	"main": "./out/extension",
 	"activationEvents": [
-		"onDebug"
+		"onDebug",
+		"onCommand"
 	],
 	"contributes": {
+		"configuration": {
+			"type": "object",
+			"title": "DeZog configuration",
+			"properties": {
+				"dezog.logpanel": {
+					"description": "Write global logs to an output panel.",
+					"type": "boolean",
+					"scope": "resource"
+				},
+				"dezog.logfile": {
+					"description": "Write global logs to the given file.",
+					"type": "string",
+					"scope": "resource"
+				},
+				"dezog.socket.logpanel": {
+					"description": "Write socket logs to an output panel.",
+					"type": "boolean",
+					"scope": "resource"
+				},
+				"dezog.socket.logfile": {
+					"description": "Write socket logs to the given file.",
+					"type": "string",
+					"scope": "resource"
+				}
+			}
+		},
+		"languages": [
+			{
+				"id": "asm-collection",
+				"extensions": [
+					".list",
+					".lis",
+					".a80",
+					".asm",
+					".inc",
+					".s"
+				],
+				"aliases": [
+					"Assembler file"
+				]
+			}
+		],
 		"breakpoints": [
+			{
+				"language": "asm-collection"
+			},
 			{
 				"language": "z80-macroasm"
 			},
@@ -80,44 +145,225 @@
 		],
 		"commands": [
 			{
-				"command": "extension.z80-debug.movePCtoCursor",
+				"command": "dezog.whatsNew",
+				"title": "Show 'What's New' page of this DeZog release.",
+				"category": "dezog"
+			},
+			{
+				"command": "dezog.movePCtoCursor",
 				"title": "Move Program Counter to Cursor",
-				"category": "z80-debug"
+				"category": "dezog"
+			},
+			{
+				"command": "dezog.clearAllDecorations",
+				"title": "Clear all decorations",
+				"category": "dezog"
+			},
+			{
+				"command": "dezog.runAllUnitTests",
+				"title": "Run all unit tests",
+				"category": "dezog"
+			},
+			{
+				"command": "dezog.debugAllUnitTests",
+				"title": "Run all unit tests in debug mode",
+				"category": "dezog"
+			},
+			{
+				"command": "dezog.cancelUnitTests",
+				"title": "Cancels all running unit test cases.",
+				"category": "dezog"
+			},
+			{
+				"command": "dezog.getAllUnitTests",
+				"title": "Get all unit test case labels.",
+				"category": "dezog-partial-unit-testing"
+			},
+			{
+				"command": "dezog.initUnitTests",
+				"title": "Initializes partial unit testing.",
+				"category": "dezog-partial-unit-testing"
+			},
+			{
+				"command": "dezog.execUnitTestCase",
+				"title": "(Delayed) execution of one unit test case.",
+				"category": "dezog-partial-unit-testing"
+			},
+			{
+				"command": "dezog.runPartialUnitTests",
+				"title": "Run all unit test cases (from execUnitTestCase).",
+				"category": "dezog-partial-unit-testing"
+			},
+			{
+				"command": "dezog.debugPartialUnitTests",
+				"title": "Run all unit test cases (from execUnitTestCase) in debug mode.",
+				"category": "dezog-partial-unit-testing"
 			}
 		],
 		"menus": {
+			"commandPalette": [
+				{
+					"command": "dezog.whatsNew"
+				},
+				{
+					"command": "dezog.runAllUnitTests"
+				},
+				{
+					"command": "dezog.debugAllUnitTests"
+				},
+				{
+					"command": "dezog.movePCtoCursor",
+					"when": "false"
+				},
+				{
+					"command": "dezog.clearAllDecorations"
+				},
+				{
+					"command": "dezog.getAllUnitTests",
+					"when": "false"
+				},
+				{
+					"command": "dezog.execUnitTestCase",
+					"when": "false"
+				},
+				{
+					"command": "dezog.debugPartialUnitTests",
+					"when": "false"
+				},
+				{
+					"command": "dezog.runPartialUnitTests",
+					"when": "false"
+				},
+				{
+					"command": "dezog.initUnitTests",
+					"when": "false"
+				}
+			],
 			"editor/context": [
 				{
-					"when": "resourceLangId == asm-collection",
-					"command": "extension.z80-debug.movePCtoCursor",
+					"when": "resourceLangId == asm-collection && inDebugMode",
+					"command": "dezog.movePCtoCursor",
 					"group": "debug"
 				}
 			]
 		},
 		"debuggers": [
 			{
-				"type": "z80-debug",
-				"label": "Z80 Debugger",
+				"type": "dezog",
+				"label": "DeZog",
 				"program": "./out/emuldebugadapter.js",
 				"runtime": "node",
 				"configurationAttributes": {
 					"launch": {
 						"required": [
-							"zport",
-							"zhostname"
+							"remoteType",
+							"rootFolder",
+							"listFiles"
 						],
 						"properties": {
-							"zhostname": {
+							"remoteType": {
 								"type": "string",
-								"description": "The hostname/IP address of the Zesarux Debugger."
+								"description": "It is possible to use DeZog with different remotes. Here you choose the type, i.e. 'zrcp' (ZEsarUX), 'zxnext' or 'zxsim' (internal Z80 simulator). Note: Certain features or properties are not available in all types.",
+								"default": "zrcp"
 							},
-							"zport": {
-								"type": "number",
-								"description": "The port of the Zesarux Debugger."
+							"zrcp": {
+								"hostname": {
+									"type": "string",
+									"description": "The hostname/IP address of the ZEsarUX Emulator."
+								},
+								"port": {
+									"type": "number",
+									"description": "The port of the ZEsarUX Emulator."
+								},
+								"loadDelay": {
+									"type": "number",
+									"description": "An additional delay before the assembler program is loaded in ZEsarUX. Use this only if you have problems starting the debug session on Windows. Default: 100ms on Windows, 0ms on other systems."
+								},
+								"socketTimeout": {
+									"type": "number",
+									"description": "In secs. If no response is received within this time the connection is disconnected. Usually you don't need to change this value. Defaults to 5 seconds."
+								}
+							},
+							"cspect": {
+								"hostname": {
+									"type": "string",
+									"description": "The hostname/IP address of the CSpect socket."
+								},
+								"port": {
+									"type": "number",
+									"description": "The port of the CSpect socket."
+								},
+								"socketTimeout": {
+									"type": "number",
+									"description": "In secs. If no response is received within this time the connection is disconnected. Usually you don't need to change this value. Defaults to 5 seconds."
+								}
+							},
+							"zsim": {
+								"loadZxRom": {
+									"type": "boolean",
+									"description": "Loads the 48K Spectrum ROM (or the 128K Spectrum ROM) at start. Otherwise the memory 0-0x3FFF is empty RAM.",
+									"default": true
+								},
+								"zxKeyboard": {
+									"type": "boolean",
+									"description": "If enabled the simulator shows a keyboard to simulate keypresses.",
+									"default": true
+								},
+								"visualMemory": {
+									"type": "string",
+									"description": "If enabled the simulator shows the access to the memory (0-0xFFFF) visually while the program is running.\nDifferent views are possible:\n- 'none': no view\n- '64K': One memory area of 64K, no banks.\n- 'ZX48': ROM and RAM as of the ZX Spectrum 48K.\n- 'ZX128': Banked memory as of the ZX Spectrum 48K (16k slots/banks).\n- 'ZXNEXT': Banked memory as of the ZX Next (8k slots/banks). The default depends on the banking settings.",
+									"default": "ZX48"
+								},
+								"ulaScreen": {
+									"type": "boolean",
+									"description": "If enabled it shows the contents of the ZX Spectrum screen.",
+									"default": true
+								},
+								"memoryPagingControl": {
+									"type": "boolean",
+									"description": "If enabled the ZX 128K memory banks can be paged in. Use this to simulate a ZX 128K.",
+									"default": false
+								},
+								"tbblueMemoryManagementSlots": {
+									"type": "boolean",
+									"description": "If enabled the ZX Next memory banking is enabled through registers 0x50-0x57.",
+									"default": false
+								},
+								"cpuLoadInterruptRange": {
+									"type": "number",
+									"description": "The number of interrupts to calculate the CPU-load average from. 0 to disable.",
+									"default": 1
+								},
+								"Z80N": {
+									"type": "boolean",
+									"description": "Default is false. If enabled the Z80N extended instructions are supported. Default: If 'tbblueMemoryManagementSlots' defaults to true, otherwise false.",
+									"default": false
+								},
+								"vsyncInterrupt": {
+									"type": "boolean",
+									"description": "Default is true if some ZX Spectrum feature is enabled otherwise false. If enabled an interrupt is generated after ca. 20ms (this assumes a CPU clock of 3.5MHz).",
+									"default": false
+								}
+							},
+							"zxnext": {
+								"baudrate": {
+									"type": "number",
+									"description": "The baudrate. Note: If you change the baudrate here you also need to change the baudrate at the remote.",
+									"default": 230400
+								},
+								"port": {
+									"type": "string",
+									"description": "The COM port. Nowadays this is normally USB/serial connection. E.g. /dev/tty.usbserial-#### on a Mac or COM1/COM2 etc. on Windows.",
+									"default": "/dev/tty.usbserial"
+								}
+							},
+							"unitTests": {
+								"type": "boolean",
+								"description": "Whether the configuration contains the unit tests or not. Default: false."
 							},
 							"rootFolder": {
 								"type": "string",
-								"description": "The path of the root folder. All other paths are relative to this. Ususally set to ${workspaceFolder}."
+								"description": "The path of the root folder. All other paths are relative to this. Usually set to ${workspaceFolder}."
 							},
 							"listFiles": {
 								"type": "array",
@@ -149,17 +395,22 @@
 												},
 												"filter": {
 													"type": "string",
-													"description": "You can add a filter with a regular expression here. On reading of the .list file the regular expression is applied on every line. This can be used e.g. to turn a list file of an unsupported assembler into a format that is understood by z80-debug. Can be omitted.\nExample: '/^[0-9]+\\s+//'. The line number at the start of each line is deleted.\nIs not required for 'z80asm', 'sjasmplus' or 'z88dk'.",
+													"description": "You can add a filter with a regular expression here. On reading of the .list file the regular expression is applied on every line. This can be used e.g. to turn a list file of an unsupported assembler into a format that is understood by dezog. Can be omitted.\nExample: '/^[0-9]+\\s+//'. The line number at the start of each line is deleted.\nIs not required for 'z80asm', 'sjasmplus' or 'z88dk'.",
 													"default": null
 												},
 												"asm": {
 													"type": "string",
-													"description": "The used assembler. 'z80asm' (default), 'sjasmplus' or 'z88dk'.",
+													"description": "The used assembler. 'sjasmplus' (default), 'z80asm' or 'z88dk'.",
 													"default": "z80asm"
 												},
 												"addOffset": {
 													"type": "number",
-													"description": "To add an offset to each address in the .list file. Could be used if the addresses in the list file do not start at the ORG (as with z88dk).",
+													"description": "To add an offset to each address in the .list file. Could be used if the addresses in the list file do not start at the ORG.",
+													"default": 0
+												},
+												"z88dkMapFile": {
+													"type": "string",
+													"description": "Is required only for z88dk. The map file is required to correctly parse the label values and to get correct file/line to address associations.",
 													"default": 0
 												}
 											}
@@ -169,7 +420,7 @@
 							},
 							"smallValuesMaximum": {
 								"type": "number",
-								"description": "Interpretes labels as address if value is bigger. Typically this is e.g. 512. So all numbers below are not treated as addresses if shown. So most constant values are covered with this as they are usually smaller than 512. Influences the formatting.",
+								"description": "Interprets labels as address if value is bigger. Typically this is e.g. 512. So all numbers below are not treated as addresses if shown. So most constant values are covered with this as they are usually smaller than 512. Influences the formatting.",
 								"default": 512
 							},
 							"disassemblerArgs": {
@@ -189,13 +440,34 @@
 								"type": "string",
 								"description": "(Optional) You should set this to the label or address which is above the topmost entry on the stack. It is used to determine the end of the call stack."
 							},
+							"execAddress": {
+								"type": "string",
+								"description": "The start address of program execution. Use a label or a number. Can only be omitted of a .sna file is loaded."
+							},
 							"load": {
 								"type": "string",
 								"description": "(Optional) Load a .tap or .sna file into the emulator on startup of the debug session."
 							},
+							"loadObjs": {
+								"type": "array",
+								"description": "List of one or many object files, i.e. memory dumps. (Optional)",
+								"items": {
+									"type": "object",
+									"properties": {
+										"path": {
+											"type": "string",
+											"description": "Path to the object file (.o/.obj) file."
+										},
+										"start": {
+											"type": "string",
+											"description": "The start address, e.g. 32768. Defaults to 0."
+										}
+									}
+								}
+							},
 							"startAutomatically": {
 								"type": "boolean",
-								"description": "Start automatically after launch."
+								"description": "Start automatically after launch. Default is false."
 							},
 							"resetOnLaunch": {
 								"type": "boolean",
@@ -212,10 +484,24 @@
 								"type": "boolean",
 								"description": "Skips the interrupt during stepping."
 							},
+							"history": {
+								"reverseDebugInstructionCount": {
+									"type": "number",
+									"description": "Sets the number of instructions for reverse debugging. If set to 0 then reverse debugging is turned off. Default is 10000."
+								},
+								"spotCount": {
+									"type": "number",
+									"description": "Sets the number of instructions to show in a spot. If you set this e.g. to 5 then the 5 previous and the 5 next instructions related to the current position are shown. Use 0 to disable. Default is 10."
+								},
+								"codeCoverageEnabled": {
+									"type": "boolean",
+									"description": "Enables/disables code coverage. Default is 'true."
+								}
+							},
 							"formatting": {
 								"registerVarFormat": {
 									"type": "array",
-									"description": "Defines the formatting of the registers when displayed in the VARIABLES area. E.g. as hex value or as integer. Also allows to display labels and various other formats. Use:\n${name} = the name of the register, e.g. HL\n${hex} = value as hex, e.g. A9F5\n${unsigned} = value as unsigned, e.g. 1234\n$(signed) = value as signed, e.g. -59\n$(bits) = value as bits , e.g. 10011011\n$(flags) = value interpreted as status flags (only useful for Fand F#), e.g. ZNC\n${labels} = value as label (or several labels)\n{labelsplus} = value as label (or several labels) plus an index/offset\n${pre:labels:join} = value as label (or several labels). If no label is found nothing is printed. If at leat 1 label is found the 'pre' string is printed followed by the label(s). If more than 1 label is found they are concatenated with the 'join' string.\n${b@:...} = This prefix to hex, unsigned, signed or bits allows to show the memory content of the value, i.e. it uses the value as address and shows it's contents. E.g. you can use ${b@:bits} to show the memory contents of the address the register is pointing at as a bit value.",
+									"description": "Defines the formatting of the registers when displayed in the VARIABLES area. E.g. as hex value or as integer. Also allows to display labels and various other formats. Use:\n${name} = the name of the register, e.g. HL\n${hex} = value as hex, e.g. A9F5\n${dhex} = value as hex with space between bytes, e.g. A9 F5\n${unsigned} = value as unsigned, e.g. 1234\n$(signed) = value as signed, e.g. -59\n$(bits) = value as bits , e.g. 10011011\n$(flags) = value interpreted as status flags (only useful for F and F'), e.g. ZNC\n${labels} = value as label (or several labels)\n{labelsplus} = value as label (or several labels) plus an index/offset\n${pre:labels:join} = value as label (or several labels). If no label is found nothing is printed. If at least 1 label is found the 'pre' string is printed followed by the label(s). If more than 1 label is found they are concatenated with the 'join' string.\n${b@:...} = This prefix to hex, unsigned, signed or bits allows to show the memory content of the value, i.e. it uses the value as address and shows it's contents. E.g. you can use ${b@:bits} to show the memory contents of the address the register is pointing at as a bit value.",
 									"items": {
 										"type": "string"
 									}
@@ -247,11 +533,11 @@
 								},
 								"bytesColor": {
 									"type": "string",
-									"descdescription": "The color of the bytes shown in hex."
+									"description": "The color of the bytes shown in hex."
 								},
 								"asciiColor": {
 									"type": "string",
-									"descdescription": "The text color of the ascii field."
+									"description": "The text color of the ascii field."
 								},
 								"addressHoverFormat": {
 									"type": "string",
@@ -263,7 +549,7 @@
 								},
 								"registerPointerColors": {
 									"type": "array",
-									"description": "An array with register/color pairs. All selected register will appear with the corresponden color in the memory view. Registers not chosen will not appear.",
+									"description": "An array with register/color pairs. All selected register will appear with the correspondent color in the memory view. Registers not chosen will not appear.",
 									"items": [
 										{
 											"type": "string"
@@ -272,12 +558,17 @@
 											"type": "string"
 										}
 									],
-									"default":  [
-										"HL", "darkgreen",
-										"DE", "darkcyan",
-										"BC", "dimgray",
-										"IX", "darkorange",
-										"IY", "darkviolet"
+									"default": [
+										"HL",
+										"darkgreen",
+										"DE",
+										"darkcyan",
+										"BC",
+										"dimgray",
+										"IX",
+										"darkorange",
+										"IY",
+										"darkviolet"
 									]
 								},
 								"registersMemoryView": {
@@ -286,67 +577,56 @@
 									"items": {
 										"type": "string"
 									},
-									"default": [ "HL", "DE", "BC", "IX", "IY" ]
+									"default": [
+										"HL",
+										"DE",
+										"BC",
+										"IX",
+										"IY"
+									]
 								}
 							},
-							"socketTimeout": {
+							"unitTestTimeout": {
 								"type": "number",
-								"description": "In secs. If no response is received within this time the connection is disconnected. Usually you don't need to change this value."
-							},
-							"log": {
-								"description": "(Optional) Configuration of the general logging.",
-								"properties": {
-									"channelOutputEnabled": {
-										"type": "boolean",
-										"description": "If true loging is done to channel 'Z80 Debugger'."
-									},
-									"filePath": {
-										"type": "string",
-										"description": "The relative filepath for the logs. If undefined no logging to a file is done."
-									}
-								}
-							},
-							"logSocket": {
-								"description": "(Optional) Configuration of the socket logging.",
-								"properties": {
-									"channelOutputEnabled": {
-										"type": "boolean",
-										"description": "If true loging is done to channel 'Z80 Debugger Socket'."
-									},
-									"filePath": {
-										"type": "string",
-										"description": "The relative filepath for the logs. If undefined no logging to a file is done."
-									}
-								}
+								"description": "(Optional) The timeout for unit tests. If a test lasts longer it is assumed as failed. In secs. Default = 5s."
 							}
 						}
 					}
 				},
 				"configurationSnippets": [
 					{
-						"label": "Z80 Debugger: Launch",
-						"description": "Configuration for the Z80 Debugger.",
+						"label": "DeZog: Launch",
+						"description": "Configuration for DeZog.",
 						"body": {
-							"type": "z80-debug",
+							"type": "dezog",
 							"request": "launch",
-							"name": "Z80 Debugger",
-							"zhostname": "localhost",
-							"zport": 10000,
+							"name": "DeZog",
+							"remoteType": "zsim",
+							"zrcp": {
+								"port": 10000
+							},
+							"cspect": {
+								"port": 10000
+							},
+							"zsim": {
+								"machine": "loadZxRom"
+							},
+							"zxnext": {
+								"baudrate": 230400,
+								"port": "/dev/tty.usbserial"
+							},
 							"topOfStack": "stack_top",
 							"listFiles": [
 								{
-									"path": "path_to_your_assembler_file.list",
-									"sources": ""
+									"path": "path_to_your_assembler_file.list"
 								}
 							],
 							"disassemblerArgs": {
 								"esxdosRst": true
 							},
-							"labelsFiles": [
-								"path_to_your_assembler_file.labels"
-							],
 							"load": "path_to_your_sna_file.sna",
-							"skipInterrupt": true
+							"skipInterrupt": true,
+							"codeCoverage": false
 						}
 					}
 				]
