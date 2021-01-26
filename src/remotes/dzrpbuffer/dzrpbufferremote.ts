@@ -1,9 +1,10 @@
-import {LogSocket} from '../../log';
-import {DzrpRemote, AlternateCommand} from '../dzrp/dzrpremote';
-import {Z80RegistersClass, Z80_REG, Z80Registers, Z80RegistersStandardDecoder} from '../z80registers';
+import {Log, LogSocket} from '../../log';
+import {DzrpRemote, AlternateCommand, DzrpMachineType} from '../dzrp/dzrpremote';
+import {Z80Registers, Z80RegistersClass, Z80_REG} from '../z80registers';
 import {Utility} from '../../misc/utility';
 import {DZRP, DZRP_VERSION, DZRP_PROGRAM_NAME} from '../dzrp/dzrpremote';
 import {GenericBreakpoint} from '../../genericwatchpoint';
+import {Labels} from '../../labels/labels';
 
 
 
@@ -84,8 +85,6 @@ export class DzrpBufferRemote extends DzrpRemote {
 		this.sequenceNumber=0;
 		// Instantiate the message queue
 		this.messageQueue=new Array<MessageBuffer>();
-		// Set decoder
-		Z80Registers.decoder=new Z80RegistersStandardDecoder();
 	}
 
 
@@ -125,7 +124,7 @@ export class DzrpBufferRemote extends DzrpRemote {
 		this.stopCmdRespTimeout();
 		this.cmdRespTimeout=setTimeout(() => {
 			this.stopCmdRespTimeout();
-			const err=new Error('No response received.');
+			const err=new Error('No response received from remote.');
 			// Log
 			LogSocket.log('Warning: '+err.message);
 			// Show warning
@@ -170,14 +169,14 @@ export class DzrpBufferRemote extends DzrpRemote {
 	protected async sendDzrpCmd(cmd: DZRP, data?: Buffer|Array<number>, respTimeoutTime?: number): Promise<Buffer> {
 		return new Promise<Buffer>(async (resolve, reject) => {
 			// Calculate length
-			let len=2;
+			let len=0;
 			if (data) {
 				if (Array.isArray(data))
 					data=Buffer.from(data);	// Convert to Buffer if Array
 				len+=data.length;
 			}
 			// Put length in buffer
-			const totalLength=4+len;
+			const totalLength=4+2+len;
 			const buffer=Buffer.alloc(totalLength);
 			// Encode length
 			buffer[0]=len&0xFF;
@@ -212,7 +211,15 @@ export class DzrpBufferRemote extends DzrpRemote {
 	 * @param reject Called when the command/response timeout elapses.
 	 * @returns A Promise. The resolve/reject functions are stored in the messageQueue.
 	 */
-	protected putIntoQueue(buffer: Buffer, respTimeoutTime: number, resolve: (buffer) => void, reject:(error) => void) {
+	protected putIntoQueue(buffer: Buffer, respTimeoutTime: number, resolve: (buffer) => void, reject: (error) => void) {
+
+		const l = this.messageQueue.length;
+		if (l > 0) {
+			const prevMsg = this.messageQueue[l - 1];
+			if (prevMsg[5] == DZRP.CMD_CONTINUE)
+				console.log();
+		}
+
 		// Create new buffer entry
 		const entry=new MessageBuffer();
 		entry.buffer=buffer;
@@ -296,7 +303,7 @@ export class DzrpBufferRemote extends DzrpRemote {
 
 			// Strip length
 			const length=this.expectedLength-4;
-			const strippedBuffer=new Buffer(length);
+			const strippedBuffer=Buffer.alloc(length);
 			this.receivedData.copy(strippedBuffer, 0, 4, this.expectedLength);
 
 			// Log
@@ -312,14 +319,14 @@ export class DzrpBufferRemote extends DzrpRemote {
 			this.receivingHeader=true;
 			if (overLength==0) {
 				this.expectedLength=4;
-				this.receivedData=new Buffer(0);
+				this.receivedData=Buffer.alloc(0);
 				return;
 			}
 
 			// More data has been received
-			const nextBuffer=new Buffer(overLength);
+			const nextBuffer=Buffer.alloc(overLength);
 			this.receivedData.copy(nextBuffer, 0, this.expectedLength);
-			this.receivedData=new Buffer(0);
+			this.receivedData=Buffer.alloc(0);
 			// Call again
 			this.expectedLength=4;
 			this.dataReceived(nextBuffer);
@@ -342,18 +349,23 @@ export class DzrpBufferRemote extends DzrpRemote {
 		// Check for notification
 		if (recSeqno==0) {
 			// Notification.
-			const breakNumber=data[2];
-			const breakAddress=Utility.getWord(data, 3);
 			// Call resolve of 'continue'
 			if (this.continueResolve) {
 				const continueHandler=this.continueResolve;
 				this.continueResolve=undefined;
+				// Get data
+				const breakNumber=data[2];
+				let breakAddress=Utility.getWord(data, 3);
+				if (Labels.AreLongAddressesUsed()) {
+					const breakAddressBank=data[5];
+					breakAddress+=breakAddressBank<<16;
+				}
 				// Get reason string
-				let breakReasonString=Utility.getStringFromBuffer(data, 5);
+				let breakReasonString=Utility.getStringFromBuffer(data, 6);
 				if (breakReasonString.length==0)
 					breakReasonString=undefined as any;
 
-				// Handle the break
+				// Handle the break.
 				continueHandler({breakNumber, breakAddress, breakReasonString});
 			}
 		}
@@ -362,12 +374,12 @@ export class DzrpBufferRemote extends DzrpRemote {
 			this.stopCmdRespTimeout();
 			// Get latest sent message
 			const msg=this.messageQueue[0];
-			Utility.assert(msg);
+			Utility.assert(msg, "DZRP: Response received without request.");
 			// Get sequence number
 			const seqno=msg.buffer[4];
 			// Check response
 			if (recSeqno!=seqno) {
-				const error=Error("Received wrong SeqNo. '"+recSeqno+"' instead of expected '"+seqno+"'");
+				const error=Error("DZRP: Received wrong SeqNo. '"+recSeqno+"' instead of expected '"+seqno+"'");
 				LogSocket.log("Error: "+error);
 				this.emit('error', error);
 				return;
@@ -470,20 +482,23 @@ export class DzrpBufferRemote extends DzrpRemote {
 
 	/**
 	 * Sends the command to init the remote.
-	 * @returns The error, program name (incl. version) and dzrp version.
+	 * @returns The error, program name (incl. version), dzrp version and the machine type.
 	 * error is 0 on success. 0xFF if version numbers not match.
 	 * Other numbers indicate an error on remote side.
 	 */
-	protected async sendDzrpCmdInit(): Promise<{error: string|undefined, programName: string, dzrpVersion: string}> {
+	protected async sendDzrpCmdInit(): Promise<{error: string|undefined, programName: string, dzrpVersion: string, machineType: DzrpMachineType}> {
 		const nameBuffer=Utility.getBufferFromString(DZRP_PROGRAM_NAME);
 		const resp=await this.sendDzrpCmd(DZRP.CMD_INIT, [...DZRP_VERSION, ...nameBuffer], this.initCloseRespTimeoutTime);
+		// Error
 		let error;
 		if (resp[0]!=0)
 			error="Remote returned an error code: "+resp[0];
+		// DZRP Version
 		const dzrp_version=""+resp[1]+"."+resp[2]+"."+resp[3];
-		let program_name=Utility.getStringFromBuffer(resp, 4);
-		if (!program_name)
-			program_name="Unknown";
+		// Get machine type
+		const machineType=resp[4];
+		// Program name
+		const program_name=Utility.getStringFromBuffer(resp, 5);
 		// Check version number. Check only major and minor number.
 		if (DZRP_VERSION[0]!=resp[1]
 			||DZRP_VERSION[1]!=resp[2]) {
@@ -491,7 +506,8 @@ export class DzrpBufferRemote extends DzrpRemote {
 			error+="Required version is "+DZRP_VERSION[0]+"."+DZRP_VERSION[1]+".\n";
 			error+="But this remote ("+program_name+") supports only version "+resp[1]+"."+resp[2]+".";
 		}
-		return {error, dzrpVersion: dzrp_version, programName: program_name};
+
+		return {error, dzrpVersion: dzrp_version, programName: program_name, machineType};
 	}
 
 
@@ -510,7 +526,9 @@ export class DzrpBufferRemote extends DzrpRemote {
 	 */
 	protected async sendDzrpCmdGetRegisters(): Promise<Uint16Array> {
 		// Get regs
+		Log.log('sendDzrpCmdGetRegisters ->', JSON.stringify(Z80Registers.getCache() || {}));
 		const regs=await this.sendDzrpCmd(DZRP.CMD_GET_REGISTERS);
+		Log.log('sendDzrpCmdGetRegisters ----', Z80Registers.getCache() || "undefined");
 		const pc=Utility.getWord(regs, 0);
 		const sp=Utility.getWord(regs, 2);
 		const af=Utility.getWord(regs, 4);
@@ -527,13 +545,22 @@ export class DzrpBufferRemote extends DzrpRemote {
 		const i=regs[25];
 		const im=regs[26];
 
+		// Get slots
+		const slotCount=regs[28];
+		const slots=new Array<number>(slotCount);
+		for (let i=0; i<slotCount; i++)
+			slots[i]=regs[29+i];
+
 		// Convert regs
 		const regData=Z80RegistersClass.getRegisterData(
 			pc, sp,
 			af, bc, de, hl,
 			ix, iy,
 			af2, bc2, de2, hl2,
-			i, r, im);
+			i, r, im,
+			slots);
+
+		Log.log('sendDzrpCmdGetRegisters <-', Z80Registers.getCache() || "undefined");
 
 		return regData;
 	}
@@ -589,13 +616,13 @@ export class DzrpBufferRemote extends DzrpRemote {
 	 * ID. If the breakpoint could not be set it is set to 0.
 	 */
 	protected async sendDzrpCmdAddBreakpoint(bp: GenericBreakpoint): Promise<void> {
-		const bpAddress=bp.address;
+		const bpAddress=bp.address;	// A long address
 		let condition=bp.condition;
 		// Convert condition string to Buffer
 		if (!condition)
 			condition='';
 		const condBuf=Utility.getBufferFromString(condition);
-		const data=await this.sendDzrpCmd(DZRP.CMD_ADD_BREAKPOINT, [bpAddress&0xFF, bpAddress>>>8, ...condBuf]);
+		const data=await this.sendDzrpCmd(DZRP.CMD_ADD_BREAKPOINT, [bpAddress&0xFF, (bpAddress>>>8)&0xFF, (bpAddress>>>16)&0xFF, ...condBuf]);
 		bp.bpId=Utility.getWord(data, 0);
 	}
 
@@ -612,40 +639,45 @@ export class DzrpBufferRemote extends DzrpRemote {
 
 	/**
 	 * Sends the command to add a watchpoint.
-	 * @param address The watchpoint address. 0x0000-0xFFFF.
+	 * @param address The watchpoint long address.
 	 * @param size The size of the watchpoint. address+size-1 is the last address for the watchpoint.
 	 * I.e. you can watch whole memory areas.
-	 * @param condition The watchpoint condition as string. If there is n0 condition
-	 * 'condition' may be undefined or an empty string ''.
+	 * @param access 'r', 'w' or 'rw'.
 	 */
-	protected async sendDzrpCmdAddWatchpoint(address: number, size: number, access: string, condition: string): Promise<void> {
-		// Convert condition string to Buffer
-		if (!condition)
-			condition='';
-		const condBuf=Utility.getBufferFromString(condition);
+	protected async sendDzrpCmdAddWatchpoint(address: number, size: number, access: string): Promise<void> {
 		let accessCode=0;
 		if (access.indexOf('r')>=0)
 			accessCode+=0x01;
 		if (access.indexOf('w')>=0)
 			accessCode+=0x02;
 		await this.sendDzrpCmd(DZRP.CMD_ADD_WATCHPOINT, [
-			address&0xFF, address>>>8,
+			address&0xFF,
+			(address>>>8)&0xFF,
+			(address>>>16)&0xFF, // bank
 			size&0xFF, size>>>8,
-			accessCode,
-			...condBuf,
+			accessCode
 		]);
 	}
 
 
 	/**
 	 * Sends the command to remove a watchpoint for an address range.
-	 * @param address The watchpoint address. 0x0000-0xFFFF.
+	 * @param address The watchpoint long address.
 	 * @param size The size of the watchpoint. address+size-1 is the last address for the watchpoint.
+	 * @param access 'r', 'w' or 'rw'.
 	 */
-	protected async sendDzrpCmdRemoveWatchpoint(address: number, size: number): Promise<void> {
-		await this.sendDzrpCmd(DZRP.CMD_REMOVE_WATCHPOINT, [
-			address&0xFF, address>>>8,
-			size&0xFF, size>>>8
+	protected async sendDzrpCmdRemoveWatchpoint(address: number, size: number, access: string): Promise<void> {
+		let accessCode=0;
+		if (access.indexOf('r')>=0)
+			accessCode+=0x01;
+		if (access.indexOf('w')>=0)
+			accessCode+=0x02;
+		await this.sendDzrpCmd(DZRP.CMD_ADD_WATCHPOINT, [
+			address&0xFF,
+			(address>>>8)&0xFF,
+			(address>>>16)&0xFF, // bank
+			size&0xFF, size>>>8,
+			accessCode
 		]);
 	}
 
@@ -684,21 +716,16 @@ export class DzrpBufferRemote extends DzrpRemote {
 	 * Sends the command to write a memory bank.
 	 * @param bank 8k memory bank number.
 	 * @param dataArray The data to write.
+	 * @throws An exception if e.g. the bank size does not match.
  	*/
 	public async sendDzrpCmdWriteBank(bank: number, dataArray: Buffer|Uint8Array): Promise<void> {
-		await this.sendDzrpCmd(DZRP.CMD_WRITE_BANK, [bank, ...dataArray]);
-	}
-
-
-	/**
-	 * Sends the command to read the slot/bank associations (8k banks).
-	 * @returns A Promise with an number array of 8 slots.
-	 *  Each entry contains the correspondent bank number.
- 	*/
-	public async sendDzrpCmdGetSlots(): Promise<number[]> {
-		const buffer=await this.sendDzrpCmd(DZRP.CMD_GET_SLOTS);
-		const slots=[...buffer];
-		return slots;
+		const resp=await this.sendDzrpCmd(DZRP.CMD_WRITE_BANK, [bank, ...dataArray]);
+		const error=resp[0];
+		let errorString;
+		if (error!=0) {
+			errorString=Utility.getStringFromBuffer(resp, 1);
+			throw Error("sendDzrpCmdWriteBank: "+errorString);
+		}
 	}
 
 
@@ -832,6 +859,54 @@ export class DzrpBufferRemote extends DzrpRemote {
 	public async sendDzrpCmdSetBorder(borderColor: number): Promise<void> {
 		await this.sendDzrpCmd(DZRP.CMD_SET_BORDER, [borderColor]);
 	}
+
+
+	/**
+	 * Sends the command to set all breakpoints.
+	 * For the ZXNext all breakpoints are set at once just before the
+	 * next 'continue' is executed.
+	 * @param bpAddresses The breakpoint addresses. Each 0x0000-0xFFFF.
+	 * @returns A Promise with the memory contents from each breakpoint address.
+	 */
+	protected async sendDzrpCmdSetBreakpoints(bpAddresses: Array<number>): Promise<Array<number>> {
+		// Create buffer from array
+		const count=bpAddresses.length;
+		const buffer=Buffer.alloc(3*count);
+		let i=0;
+		for (const addr of bpAddresses) {
+			buffer[i++]=addr&0xFF;
+			buffer[i++]=(addr>>>8)&0xFF;
+			buffer[i++]=(addr>>>16)&0xFF;
+		}
+		const opcodes=await this.sendDzrpCmd(DZRP.CMD_SET_BREAKPOINTS, buffer);
+		return [...opcodes];
+	}
+
+
+	/**
+	 * Sends the command to restore the memory for all breakpoints.
+	 * This is send just after the 'continue' command.
+	 * So that the user only sees correct memory contents even if doing
+	 * a disassembly or memory read.
+	 * It is also required otherwise the breakpoints in 'calcStep' are not correctly
+	 * calculated.
+	 * @param elems The addresses + memory content.
+	 */
+	protected async sendDzrpCmdRestoreMem(elems: Array<{address: number, value: number}>): Promise<void> {
+		// Create buffer from array
+		const count=elems.length;
+		const buffer=Buffer.alloc(4*count);
+		let i=0;
+		for (const elem of elems) {
+			const addr=elem.address;
+			buffer[i++]=addr&0xFF;
+			buffer[i++]=(addr>>>8)&0xFF;
+			buffer[i++]=(addr>>>16)&0xFF;
+			buffer[i++]=elem.value;
+		}
+		await this.sendDzrpCmd(DZRP.CMD_RESTORE_MEM, buffer);
+	}
+	spec
 
 }
 

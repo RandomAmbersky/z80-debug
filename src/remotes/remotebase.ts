@@ -5,12 +5,14 @@ import {CallStackFrame} from '../callstackframe';
 import {EventEmitter} from 'events';
 import {GenericWatchpoint, GenericBreakpoint} from '../genericwatchpoint';
 import {Labels, SourceFileEntry} from '../labels/labels';
-import {Settings, ListFile} from '../settings';
+import {Settings/*, ListFile*/} from '../settings';
 import {Utility} from '../misc/utility';
 import {BaseMemory} from '../disassembler/basememory';
 import {Opcode, OpcodeFlag} from '../disassembler/opcode';
-import {CpuHistory, StepHistory} from './cpuhistory';
+import {StepHistory} from './cpuhistory';
 import {Disassembly, DisassemblyClass} from '../misc/disassembly';
+import {MemoryBank, MemoryModel} from './Paging/memorymodel';
+import {Log} from '../log';
 
 
 
@@ -25,6 +27,7 @@ export enum BREAK_REASON_NUMBER {
 	BREAKPOINT_HIT=2,	// 2=breakpoint hit
 	WATCHPOINT_READ=3,	// 3=watchpoint hit read access
 	WATCHPOINT_WRITE=4,	// 4=watchpoint hit write access
+	CPU_ERROR=5,		// 5=CPU error, e.g. error in custom javascript code
 
 	// Internally used
 	STEPPING_NOT_ALLOWED=100,	// For ZxNextRemote if trying to step code used for debugging.
@@ -47,19 +50,6 @@ export interface RemoteBreakpoint extends GenericBreakpoint {
 
 
 
-/// Definition of one memory bank, i.e. memory slot/bank relationship.
-export interface MemoryBank {
-	/// Z80 start address of page.
-	start: number;
-
-	/// Z80 end address of page.
-	end: number;
-
-	/// The name of the mapped memory area.
-	name: string;
-};
-
-
 /**
  * The Remote's base class.
  * It implements, provides stubs or interfaces to deal with:
@@ -76,12 +66,12 @@ export interface MemoryBank {
  * setBreakPoints. The Remote will now compare the breakpoints with the internal
  * 'breakpoints' array and set/remove all changed breakpoints.
  *
- * The additional 'watchpoints', 'assertBreakpoints' and 'logpoints'
+ * The additional 'watchpoints', 'assertionBreakpoints' and 'logpoints'
  * arrays can be enabled/disabled as a group via a debug command.
  * - 'watchPoints': These are associated with the WPMEM keyword and create
- * a memory watchpoint (a breakpoint that is hit if a memory adress is
+ * a memory watchpoint (a breakpoint that is hit if a memory address is
  * accessed).
- * - 'assertBreakpoints': These are very much like conditional breakpoints but associated with the ASSERT keyword.
+ * - 'assertionBreakpoints': These are very much like conditional breakpoints but associated with the ASSERTION keyword.
  * - 'logpoints': These are just like breakpoints with a log message but associated with the LOGPOINT keyword.
  * Note: The attached emulator may use the same mechanism for all these
  * kinds of breakpoints but in DeZog they are differentiated.
@@ -93,6 +83,7 @@ export class RemoteBase extends EventEmitter {
 	static MAX_STACK_ITEMS=100;
 
 	/// The top of the stack. Used to limit the call stack.
+	/// 64k address.
 	public topOfStack: number;
 
 	/// A list for the frames (call stack items). Is cached here.
@@ -110,17 +101,24 @@ export class RemoteBase extends EventEmitter {
 	/// Stores the wpmem watchpoints (this is a smaller list, if watchpoints can be given manually)
 	protected wpmemWatchpoints=new Array<GenericWatchpoint>();
 
-	/// Stores the assert breakpoints
-	protected assertBreakpoints=new Array<GenericBreakpoint>();
+	/// Stores the assertion breakpoints
+	protected assertionBreakpoints=new Array<GenericBreakpoint>();
 
-	/// The assert breakpoints can only be enabled/disabled alltogether.
-	public assertBreakpointsEnabled=false;
+	/// The assertion breakpoints can only be enabled/disabled alltogether.
+	public assertionBreakpointsEnabled=false;
 
 	/// Stores the log points
 	protected logpoints=new Map<string, Array<GenericBreakpoint>>();
 
 	/// The logpoints can be enabled/disabled per group.
 	public logpointsEnabled=new Map<string, boolean>();
+
+	/// Memory slots. Contain the used banks.
+	/// If undefined the data has to be retrieved from the remote.
+	//protected slots: number[]|undefined=undefined;
+
+	/// The used memory model. E.g. if and how slots are used.
+	public memoryModel: MemoryModel;
 
 
 	/// Constructor.
@@ -137,6 +135,24 @@ export class RemoteBase extends EventEmitter {
 	public async init(): Promise<void> {
 		// Call custom initialization
 		await this.doInitialization();
+
+		// This needs to be done after the initialization to get the labels converted correctly:
+
+		// Set watchpoints (memory guards)
+		const watchPointLines = Labels.getWatchPointLines();
+		const watchpoints = this.createWatchPoints(watchPointLines);
+		this.setWPMEMArray(watchpoints);
+
+		// ASSERTIONs
+		// Set assertion breakpoints
+		const assertionLines = Labels.getAssertionLines();
+		const assertionsArray = this.createAssertions(assertionLines);
+		this.setASSERTIONArray(assertionsArray);
+
+		// LOGPOINTs
+		const logPointLines = Labels.getLogPointLines();
+		const logPointsMap = this.createLogPoints(logPointLines);
+		this.setLOGPOINTArray(logPointsMap);
 	}
 
 
@@ -176,50 +192,55 @@ export class RemoteBase extends EventEmitter {
 
 			try {
 				// Now check more thoroughly: group1=address, group3=length, group5=access, group7=condition
-				const match=/;\s*WPMEM(?=[,\s]|$)\s*([^\s,]*)?(\s*,\s*([^\s,]*)(\s*,\s*([^\s,]*)(\s*,\s*([^,]*))?)?)?/.exec(entry.line);
-				if (match) {
-					// get arguments
-					let addressString=match[1];
-					let lengthString=match[3];
-					let access=match[5];
-					let cond=match[7];	// This is supported only with "fast-breakpoints" not with the unmodified ZEsarUX. Also the new (7.1) faster memory breakpoints do not support conditions.
-					// defaults
-					let entryAddress: number|undefined=entry.address;
-					if (addressString&&addressString.length>0)
-						entryAddress=Utility.evalExpression(addressString, false); // don't evaluate registers
-					if (isNaN(entryAddress))
-						continue;	// could happen if the WPMEM is in an area that is conditionally not compiled, i.e. label does not exist.
-					let length=1;
-					if (lengthString&&lengthString.length>0) {
-						length=Utility.evalExpression(lengthString, false); // don't evaluate registers
-					}
-					else {
-						if (!addressString||addressString.length==0) {
-							// If both, address and length are not defined it is checked
-							// if there exists bytes in the list file (i.e.
-							// numbers after the address field).
-							// If not the "WPMEM" is assumed to be inside a
-							// macro and omitted.
-							const match=/^[0-9a-f]+\s[0-9a-f]+/i.exec(entry.line);
-							if (!match)
-								continue;
-						}
-					}
-					if (access&&access.length>0) {
-						access=access.toLocaleLowerCase();
-						if (access!='r'&&access!='w'&&access!='rw') {
-							console.log("Wrong access mode in watch point. Allowed are only 'r', 'w' or 'rw' but found '"+access+"' in line: '"+entry.line+"'");
-							continue;
-						}
-					}
-					else
-						access='rw';
-					// set watchpoint
-					watchpoints.push({address: entryAddress, size: length, access: access, condition: cond||''});
+				//const match = /^WPMEM(?=[,\s]|$)\s*([^\s,]*)?(\s*,\s*([^\s,]*)(\s*,\s*([^\s,]*)(\s*,\s*([^,]*))?)?)?/.exec(entry.line)
+				// All lines start with WPMEM, remove it
+				const line = entry.line.substr(5);
+				const subParts = line.split(',').map(s => s.trim());
+				// Get arguments
+				let addressString = subParts[0];
+				let lengthString = subParts[1];
+				let access = subParts[2];
+				let cond = subParts[3];	// This is supported only with "fast-breakpoints" not with the unmodified ZEsarUX. Also the new (7.1) faster memory breakpoints do not support conditions.
+				// defaults
+				let entryAddress: number | undefined = entry.address;
+				if (addressString && addressString.length > 0)
+					entryAddress = Utility.evalExpression(addressString, false); // don't evaluate registers
+				if (isNaN(entryAddress))
+					continue;	// could happen if the WPMEM is in an area that is conditionally not compiled, i.e. label does not exist.
+				let length = 1;
+				if (lengthString && lengthString.length > 0) {
+					length = Utility.evalExpression(lengthString, false); // don't evaluate registers
 				}
+				/*
+				else {
+					if (!addressString||addressString.length==0) {
+						// If both, address and length are not defined it is checked
+						// if there exists bytes in the list file (i.e.
+						// numbers after the address field).
+						// If not the "WPMEM" is assumed to be inside a
+						// macro and omitted.
+						const match=/^[0-9a-f]+\s[0-9a-f]+/i.exec(entry.line);
+						if (!match)
+							continue;
+					}
+				}
+				*/
+				if (access && access.length > 0) {
+					access = access.trim();
+					access = access.toLowerCase();
+					if (access != 'r' && access != 'w' && access != 'rw') {
+						const errText = "Wrong access mode in watch point. Allowed are only 'r', 'w' or 'rw' but found '" + access + "' in line: '" + entry.line + "'";
+						console.log(errText);
+						continue;
+					}
+				}
+				else
+					access = 'rw';
+				// Set watchpoint. (long address)
+				watchpoints.push({address: entryAddress, size: length, access: access, condition: cond || ''});
 			}
 			catch (e) {
-				throw "Problem with WPMEM. Could not evaluate: '"+entry.line+"': "+e+"";
+				throw Error("Problem with WPMEM. Could not evaluate: '"+entry.line+"': "+e.message+"");
 			}
 		}
 
@@ -228,96 +249,94 @@ export class RemoteBase extends EventEmitter {
 
 
 	/**
-	 * Creates an array of asserts from the text lines.
-	 * @param watchPointLines An array with address and line (text) pairs.
-	 * @return An array with asserts (GenericWatchpoints).
+	 * Creates an array of assertions from the text lines.
+	 * @param assertionLines An array with address and line (text) pairs.
+	 * @return An array with assertions (GenericWatchpoints).
 	 */
-	protected createAsserts(assertLines: Array<{address: number, line: string}>) {
-		const assertMap=new Map<number, GenericBreakpoint>();
-		// Convert ASSERTS to watchpoints
-		for (let entry of assertLines) {
-			// ASSERT:
+	protected createAssertions(assertionLines: Array<{address: number, line: string}>): Array<GenericBreakpoint> {
+		const assertionMap=new Map<number, GenericBreakpoint>();
+		// Convert ASSERTIONS to watchpoints
+		for (let entry of assertionLines) {
+			// ASSERTION:
 			// Syntax:
-			// ASSERT var comparison expr [&&|| expr]
+			// ASSERTION var comparison expr [&&|| expr]
 			// with:
 			//  var: a variable, i.e. a register like A or HL
 			//  comparison: one of '<', '>', '==', '!=', '<=', '=>'.
 			//	expr: a mathematical expression that resolves into a constant
 			// Examples:
-			// - ASSERT A < 5
-			// - ASSERT HL <= LBL_END+2
-			// - ASSERT B > (MAX_COUNT+1)/2
-			// - ASSERT false
-			// - ASSERT
+			// - ASSERTION A < 5
+			// - ASSERTION HL <= LBL_END+2
+			// - ASSERTION B > (MAX_COUNT+1)/2
+			// - ASSERTION false
+			// - ASSERTION
 
-			// ASSERTs are breakpoints with "inverted" condition.
+			// ASSERTIONs are breakpoints with "inverted" condition.
 			// Now check more thoroughly: group1=var, group2=comparison, group3=expression
 			try {
-				const matchAssert=/;.*\bASSERT\b/.exec(entry.line);
-				if (!matchAssert) {
-					// Eg. could be that "ASSERTx" was found.
+				const matchAssertion=/^ASSERTION(.*)/.exec(entry.line);
+				if (!matchAssertion)
 					continue;
-				}
 
-				// Get part of the string after the "ASSERT"
-				const part=entry.line.substr(matchAssert.index+matchAssert[0].length).trim();
+				// Get part of the string after the "ASSERTION"
+				const part=matchAssertion[1].trim();
 
-				// Check if no condition was set = ASSERT false = Always break
+				// Check if no condition was set = ASSERTION false = Always break
 				let conds='';
 				if (part.length>0) {
 					// Some condition is set
 					const regex=/\s*([^;]*)/i;
 					let match=regex.exec(part);
 					if (!match)	// At least one match should be found
-						throw "Expecting 'ASSERT expr'.";
+						throw Error("Expecting 'ASSERTION expr'.");
 					conds=match[1];
 				}
 
 				// Negate the expression
-				conds=Utility.getConditionFromAssert(conds);
+				conds=Utility.getConditionFromAssertion(conds);
 
-				// Check if ASSERT for that address already exists.
+				// Check if ASSERTION for that address already exists.
 				if (conds.length>0) {
-					let bp=assertMap.get(entry.address);
+					let bp=assertionMap.get(entry.address);
 					if (bp) {
 						// Already exists: just add condition.
 						bp.condition='('+bp.condition+') || ('+conds+')';
 					}
 					else {
 						// Breakpoint for address does not yet exist. Create a new one.
-						const assertBp={address: entry.address, condition: conds, log: undefined};
-						assertMap.set(entry.address, assertBp);
+						const assertionBp={address: entry.address, condition: conds, log: undefined};
+						assertionMap.set(entry.address, assertionBp);
 					}
 				}
 			}
 			catch (e) {
-				console.log("Problem with ASSERT. Could not evaluate: '"+entry.line+"': "+e+"");
+				console.log("Problem with ASSERTION. Could not evaluate: '"+entry.line+"': "+e.message+"");
 			}
 		}
 
 		// Convert map to array.
-		const assertsArray=Array.from(assertMap.values());
+		const assertionsArray=Array.from(assertionMap.values());
 
-		return assertsArray;
+		return assertionsArray;
 	}
 
 
 	/**
 	 * Creates an array of log points from the text lines.
-	 * @param watchPointLines An array with address and line (text) pairs.
-	 * @return An array with log points (GenericWatchpoints).
+	 * @param logPointLines An array with address and line (text) pairs.
+	 * @return An array with log points (GenericWatchpoints) for each group.
 	 */
-	protected createLogPoints(watchPointLines: Array<{address: number, line: string}>): Map<string, Array<GenericBreakpoint>> {
+	protected createLogPoints(logPointLines: Array<{address: number, line: string}>): Map<string, Array<GenericBreakpoint>> {
 		// convert labels in watchpoints.
 		const logpoints=new Map<string, Array<GenericBreakpoint>>();
-		for (let entry of watchPointLines) {
+		for (let entry of logPointLines) {
 			// LOGPOINT:
 			// Syntax:
 			// LOGPOINT [group] text ${(var):signed} text ${reg:hex} text ${w@(reg)} text ¢{b@(reg):unsigned}
 			// e.g. LOGPOINT [SPRITES] Status=${A}, Counter=${(sprite.counter):unsigned}
 
 			// Now check more thoroughly i.e. for comma
-			const match=/;.*LOGPOINT\s(\s*\[\s*(\w*)\s*\]\s)?(.*)$/.exec(entry.line);
+			const match=/^LOGPOINT\b(\s*\[\s*(\w*)\s*\])?\s*(.*)/gm.exec(entry.line);
 			if (match) {
 				// get arguments
 				const group=match[2]||"DEFAULT";
@@ -336,7 +355,7 @@ export class RemoteBase extends EventEmitter {
 				}
 				catch (e) {
 					// Show error
-					console.log("Problem with LOGPOINT. Could not evaluate: '"+entry.line+"': "+e+"");
+					console.log("Problem with LOGPOINT. Could not evaluate: '"+entry.line+"': "+e.message+"");
 				}
 			}
 		}
@@ -361,7 +380,7 @@ export class RemoteBase extends EventEmitter {
 			// Check syntax
 			const matchInner=/(([bw]@)?\s*\(\s*(.*?)\s*\)|(\w*)\s*)\s*(:\s*(unsigned|signed|hex))?\s*/i.exec(inner);
 			if (!matchInner)
-				throw "Log message format error: '"+match+"' in '"+logMsg+"'";
+				throw Error("Log message format error: '"+match+"' in '"+logMsg+"'");
 			const end=(matchInner[6])? ':'+matchInner[6]:'';
 			let addr=matchInner[3]||'';
 			if (addr.length) {
@@ -380,7 +399,7 @@ export class RemoteBase extends EventEmitter {
 					}
 					catch (e) {
 						// If it cannot be converted (e.g. a register name) an exception will be thrown.
-						throw "Log message format error: "+e.message+" in '"+logMsg+"'";
+						throw Error("Log message format error: "+e.message+" in '"+logMsg+"'");
 					}
 				}
 			}
@@ -388,79 +407,36 @@ export class RemoteBase extends EventEmitter {
 				// Should be a register (Note: this is not 100% fool proof since there are more registers defined than allowed in logs)
 				const reg=matchInner[4];
 				if (!Z80RegistersClass.isRegister(reg))
-					throw "Log message format error: Unsupported register '"+reg+"' in '"+logMsg+"'";
+					throw Error("Log message format error: Unsupported register '"+reg+"' in '"+logMsg+"'");
 				return "${"+reg+end+"}";
 			}
 		});
 
-		console.log('evalLogMessage: '+result);
+		//console.log('evalLog(point)Message: ' + result);
+		Log.log('evalLog(point)Message: ' + result);
 		return result;
 	}
 
 
 	/**
 	 * Reads the list file and also retrieves all occurrences of
-	 * WPMEM, ASSERT and LOGPOINT.
-	 * Also sets WPMEM, ASSERT and LOGPOINT break/watchpoints.
+	 * WPMEM, ASSERTION and LOGPOINT.
+	 * Also sets WPMEM, ASSERTION and LOGPOINT break/watchpoints.
 	 * May throw an error.
-	 * @param listFiles An array with all list files.
-	 * @param sources An array with directories where the source files are located.
+	 * @param configuration Contains the list files for the different assemblers
 	 */
-	public readListFiles(listFiles: Array<ListFile>) {
-		// Array for found watchpoints: WPMEM, ASSERT breakpoints, LOGPOINT watchpoints
-		const watchPointLines=new Array<{address: number, line: string}>();
-		const assertLines=new Array<{address: number, line: string}>();
-		const logPointLines=new Array<{address: number, line: string}>();
-		// Load user list and labels files
-		for (const listFile of listFiles) {
-			const file={
-				path: Utility.getAbsFilePath(listFile.path),
-				mainFile: listFile.mainFile,
-				srcDirs: listFile.srcDirs||[""],
-				filter: listFile.filter,
-				asm: listFile.asm||"sjasmplus",
-				addOffset: listFile.addOffset||0,
-				z88dkMapFile: listFile.z88dkMapFile
-			};
-			Labels.loadAsmListFile(file.path, file.mainFile, file.srcDirs, file.filter, file.asm, file.addOffset, (address, line) => {
-				// Quick search for WPMEM
-				if (line.indexOf('WPMEM')>=0) {
-					// Add watchpoint at this address
-					watchPointLines.push({address: address, line: line});
-				}
-				// Quick search for ASSERT
-				if (line.indexOf('ASSERT')>=0) {
-					// Add assert line at this address
-					assertLines.push({address: address, line: line});
-				}
-				// Quick search for LOGPOINT
-				if (line.indexOf('LOGPOINT')>=0) {
-					// Add assert line at this address
-					logPointLines.push({address: address, line: line});
-				}
-			}, file.z88dkMapFile);
-		}
+	public readListFiles(configuration: any) {
+		Labels.readListFiles(configuration);
 
-		// Finishes off the loading of the list and labels files
-		Labels.finish();
+		// Check for warnings
+		const warnings=Labels.getWarnings();
+		if (warnings)
+			this.emit('warning', warnings);
 
 		// calculate top of stack, execAddress
-		this.topOfStack=Labels.getNumberFromString(Settings.launch.topOfStack);
+		this.topOfStack=Labels.getNumberFromString64k(Settings.launch.topOfStack);
 		if (isNaN(this.topOfStack))
 			throw Error("Cannot evaluate 'topOfStack' ("+Settings.launch.topOfStack+").");
-
-		// Set watchpoints (memory guards)
-		const watchpoints=this.createWatchPoints(watchPointLines);
-		this.setWPMEMArray(watchpoints);
-
-		// ASSERTs
-		// Set assert breakpoints
-		const assertsArray=this.createAsserts(assertLines);
-		this.setASSERTArray(assertsArray);
-
-		// LOGPOINTs
-		const logPointsMap=this.createLogPoints(logPointLines);
-		this.setLOGPOINTArray(logPointsMap);
 	}
 
 
@@ -489,11 +465,10 @@ export class RemoteBase extends EventEmitter {
 
 
 	/**
-	* Gets the registers from cache. If cache is empty retrieves the registers from
-	* the emulator.
-    * Override.
-	*/
-	public async getRegisters(): Promise<void> {
+	 * If cache is empty retrieves the registers from
+	 * the Remote.
+	 */
+	public async getRegistersFromEmulator(): Promise<void> {
 		Utility.assert(false);
 	}
 
@@ -503,6 +478,16 @@ export class RemoteBase extends EventEmitter {
 	 */
 	public getPC(): number {
 		return Z80Registers.getRegValueByName("PC");
+	}
+
+
+	/**
+	 * Returns the PC as long address, i.e. with bank info.
+	 * @returns PC + (bank_nr+1)<<16
+	 */
+	public getPCLong(): number {
+		const pcLong=Z80Registers.getPCLong();
+		return pcLong;
 	}
 
 
@@ -569,16 +554,31 @@ export class RemoteBase extends EventEmitter {
 
 
 	/**
+	 * Sets the slot to a specific bank.
+	 * Used by the unit tests.
+	 * @param slot The slot to set.
+	 * @param bank The bank for the slot.
+	 */
+	public async setSlot(slotIndex: number, bank: number): Promise<void> {
+		Utility.assert(false);	// override this
+	}
+
+
+	/**
 	 * Checks the stack entry type for the given value.
 	 * If the type is CALL, RST (or interrupt) an object with the label name, the called and
 	 * the caller address is returned.
 	 * Otherwise an undefined object is returned.
+	 * Uses the 64k address in stackEntryValue and builds a
+	 * long address together with the slot.
+	 * That is used to obtain the label.
 	 * @param stackEntryValue E.g. "3B89"
 	 * @returns {name, callerAddr}
 	 * if there was a CALL or RST
 	 * - name: The label name or the hex string of the called address
-	 * - callerAddr: The caller address of the subroutine
-	 * Otherwise undefined.
+	 * - callerAddr: The caller address of the subroutine.
+	 *   Could be a long address.
+	 *   Otherwise undefined.
 	 */
 	protected async getStackEntryType(stackEntryValue: string): Promise<{name: string, callerAddr: number}|undefined> {
 		// Get the 3 bytes before address.
@@ -599,7 +599,7 @@ export class RemoteBase extends EventEmitter {
 			/*
 			I removed the check for RST:
 			An RST will happen relatively seldom. But here a RST would be found with
-			a probability of 1/16. I.e. every 16th value would be wrong.
+			a probability of 1/32. I.e. every 32th value would be wrong.
 			Therefore I better skip the detection.
 
 			// Check if one of the 2 last bytes was a RST.
@@ -628,9 +628,16 @@ export class RemoteBase extends EventEmitter {
 			return undefined;
 		}
 
+		// Convert to long address if necessary
+		if (Labels.AreLongAddressesUsed()) {
+			const slots=this.getSlots();
+			callerAddr=Z80Registers.createLongAddress(callerAddr, slots);
+			calledAddr=Z80Registers.createLongAddress(calledAddr, slots);
+		}
+
 		// Found: get label
-		const labelCalledAddrArr=Labels.getLabelsForNumber(calledAddr);
-		const labelCalledAddr=(labelCalledAddrArr.length>0)? labelCalledAddrArr[0]:Utility.getHexString(calledAddr, 4)+'h';
+		const labelCalledAddrArr=Labels.getLabelsForLongAddress(calledAddr);
+		const labelCalledAddr=(labelCalledAddrArr.length>0)? labelCalledAddrArr[0]:Utility.getHexString(calledAddr&0xFFFF, 4)+'h';
 
 		// Return
 		return {name: labelCalledAddr, callerAddr};
@@ -640,17 +647,18 @@ export class RemoteBase extends EventEmitter {
 	/**
 	* Returns the stack as an array.
 	* Oldest element is at index 0.
+	* 64k addresses.
 	* @returns The stack, i.e. the word values from topOfStack to SP.
 	* But no more than about 100 elements.
     * The values are returned as hex string, an additional info might follow.
 	* This is e.g. used for the ZEsarUX extended stack info.
 	*/
-	public async getStack(): Promise<Array<string>> {
-		await this.getRegisters();
+	public async getStackFromEmulator(): Promise<Array<string>> {
+		//await this.getRegisters();
 		const sp=Z80Registers.getSP();
 		// calculate the depth of the call stack
 		const tos=this.topOfStack;
-		var depth=tos-sp; // 2 bytes per word
+		let depth=tos-sp; // 2 bytes per word
 		if (depth>2*RemoteBase.MAX_STACK_ITEMS) depth=2*RemoteBase.MAX_STACK_ITEMS;
 
 		// Check if callstack need to be called
@@ -670,72 +678,56 @@ export class RemoteBase extends EventEmitter {
 
 
 	/**
-	 * Clears the callstack.
-	 * The next call to 'getCallStack' will not return the cached value,
-	 * but will reload the cache.
+	 * Retrieves the stack from the emulator and filters all CALL addresses.
 	 */
-	public clearCallStack() {
-		this.listFrames=undefined as any;
-	}
+	public async getCallStackFromEmulator(): Promise<void> {
+		const callStack = new RefList<CallStackFrame>();
+		// Get normal stack values
+		const stack = await this.getStackFromEmulator();	// Returns 64k addresses as hex string.
+		// Start with main
+		const sp = Z80Registers.getRegValue(Z80_REG.SP);
+		const len = stack.length;
+		const top = sp + 2 * len;
+		let lastCallStackFrame = new CallStackFrame(0, top - 2, this.getMainName(top));
+		callStack.addObject(lastCallStackFrame);
 
+		// Check for each value if it maybe is a CALL or RST
+		for (let i = 0; i < len; i++) {
+			const valueString = stack[i];
+			const type = await this.getStackEntryType(valueString);
+			if (type) {
+				// Set caller address
+				lastCallStackFrame.addr = type.callerAddr;
+				// CALL, RST or interrupt
+				const frameSP = top - 2 - 2 * (i + 1);
+				lastCallStackFrame = new CallStackFrame(0, frameSP, type.name);
+				callStack.addObject(lastCallStackFrame);
+			}
+			else {
+				// Something else, e.g. pushed value
+				lastCallStackFrame.stack.push(parseInt(valueString, 16));
+			}
+		}
 
-	/**
-	 * Returns the stored call stack.
-	 */
-	/*
-	public getCallStackCache(): RefList<CallStackFrame> {
-		return this.listFrames;
+		// Set PC
+		const pc = this.getPCLong();
+		lastCallStackFrame.addr = pc;
+
+		// Return
+		this.listFrames = callStack;
 	}
-	*/
 
 
 	/**
 	  * Returns the extended stack as array.
 	  * Oldest element is at index 0.
-	  * The extended stack .......
+	  * The function returns the call addresses as
+	  * long addresses.
 	  * @returns The stack, i.e. the word values from SP to topOfStack.
 	  * But no more than about 100 elements.
 	  */
-	public async getCallStack(): Promise<RefList<CallStackFrame>> {
-		// Check if there are already cached values.
-		if (this.listFrames)
-			return this.listFrames;
-
-		const callStack=new RefList<CallStackFrame>();
-		// Get normal stack values
-		const stack=await this.getStack();
-		// Start with main
-		const sp=Z80Registers.getRegValue(Z80_REG.SP);
-		const len=stack.length;
-		const top=sp+2*len;
-		let lastCallStackFrame=new CallStackFrame(0, top-2, this.getMainName(top));
-		callStack.addObject(lastCallStackFrame);
-
-		// Check for each value if it maybe is a CALL or RST
-		for (let i=0; i<len; i++) {
-			const valueString=stack[i];
-			const type=await this.getStackEntryType(valueString);
-			if (type) {
-				// Set caller address
-				lastCallStackFrame.addr=type.callerAddr;
-				// CALL, RST or interrupt
-				const frameSP=top-2-2*(i+1);
-				lastCallStackFrame=new CallStackFrame(0, frameSP, type.name);
-				callStack.addObject(lastCallStackFrame);
-			}
-			else {
-				// Something else, e.g. pushed value
-				lastCallStackFrame.stack.push(parseInt(valueString,16));
-			}
-		}
-
-		// Set PC
-		const pc=Z80Registers.getRegValue(Z80_REG.PC);
-		lastCallStackFrame.addr=pc;
-
-		// Return
-		this.listFrames=callStack;
-		return callStack;
+	public async getCallStackCache(): Promise<RefList<CallStackFrame>> {
+		return this.listFrames;
 	}
 
 
@@ -749,7 +741,7 @@ export class RemoteBase extends EventEmitter {
 
 	/**
 	 * Returns the name of the main function.
-	 * @param sp The current SP value.
+	 * @param sp The current SP value. 64k address.
 	 * @returns E.g. "__MAIN__" or "__MAIN-2__" if main is not at topOfStack.
 	 */
 	public getMainName(sp: number) {
@@ -763,26 +755,6 @@ export class RemoteBase extends EventEmitter {
 			}
 		}
 		return "__MAIN"+part+"__";
-	}
-
-
-	/**
-	 * Returns the stack frames.
-	 * Either the "real" ones from Remote or the virtual ones during reverse debugging.
-	 * @returns A Promise with an array with call stack frames.
-	 */
-	public async stackTraceRequest(): Promise<RefList<CallStackFrame>> {
-		// Check for reverse debugging.
-		if (CpuHistory.isInStepBackMode()) {
-			// Return virtual stack
-			Utility.assert(this.reverseDbgStack);
-			return this.reverseDbgStack;
-		}
-		else {
-			// "real" stack trace
-			const callStack=await this.getCallStack();
-			return callStack;
-		}
 	}
 
 
@@ -829,31 +801,23 @@ export class RemoteBase extends EventEmitter {
 
 	/**
 	 * 'step over' an instruction in the debugger.
-	 * @returns A Promise with:
-	 * 'instruction' is the disassembly of the current line.
-	 * 'breakReasonString' a possibly text with the break reason.
+	 * @returns A Promise with a string with the break reason.
+	 * Or 'undefined' if no reason
 	 */
-	public async stepOver(): Promise<{instruction: string, breakReasonString?: string}> {
+	public async stepOver(): Promise<string|undefined> {
 		Utility.assert(false);	// override this
-		return {
-			instruction: ""
-		};
+		return undefined;
 	}
 
 
 	/**
 	 * 'step into' an instruction in the debugger.
-	 * @returns A Promise:
-	 * 'instruction' is the disassembly of the current line.
-	 * 'breakReasonString' a possibly text with the break reason. This is mainly to keep the
-	 * record consistent with stepOver. But it is e.g. used to inform when the
-	 * end of the cpu history is reached.
+	 * @returns A Promise with a string with the break reason.
+	 * Or 'undefined' if no reason
 	 */
-	public async stepInto(): Promise<{instruction: string,breakReasonString?: string}> {
+	public async stepInto(): Promise<string|undefined> {
 		Utility.assert(false);	// override this
-		return {
-			instruction: ""
-		};
+		return undefined;
 	}
 
 
@@ -862,9 +826,9 @@ export class RemoteBase extends EventEmitter {
 	 * @returns A Promise with a string containing the break reason.
 	 * 'breakReasonString' a possibly text with the break reason.
 	 */
-	public async stepOut(): Promise<string> {
+	public async stepOut(): Promise<string|undefined> {
 		Utility.assert(false);	// override this
-		return '';
+		return undefined;
 	}
 
 
@@ -923,28 +887,28 @@ export class RemoteBase extends EventEmitter {
 
 
 	/**
-	 * Sets the ASSERTs array.
-	 * @param assertBreakpoints A list of addresses to put a guard on.
+	 * Sets the ASSERTIONs array.
+	 * @param assertionBreakpoints A list of addresses to put a guard on.
 	 */
-	public setASSERTArray(assertBreakpoints: Array<GenericBreakpoint>) {
-		this.assertBreakpoints=[...assertBreakpoints];
+	public setASSERTIONArray(assertionBreakpoints: Array<GenericBreakpoint>) {
+		this.assertionBreakpoints=[...assertionBreakpoints];
 	}
 
 
 	/**
-	 * Enables/disables all assert breakpoints set from the sources.
+	 * Enables/disables all assertion breakpoints set from the sources.
 	 * Promise is called when ready.
 	 * @param enable true=enable, false=disable.
 	 */
-	public async enableAssertBreakpoints(enable: boolean): Promise<void>{
+	public async enableAssertionBreakpoints(enable: boolean): Promise<void>{
 		Utility.assert(false);	// override this
 	}
 
 	/**
-	 * Returns the ASSERT breakpoints.
+	 * Returns the ASSERTION breakpoints.
 	 */
-	public getAllAssertBreakpoints(): Array<GenericBreakpoint> {
-		return this.assertBreakpoints;
+	public getAllAssertionBreakpoints(): Array<GenericBreakpoint> {
+		return this.assertionBreakpoints;
 	}
 
 
@@ -981,11 +945,11 @@ export class RemoteBase extends EventEmitter {
 	 * Enables/disables all logpoints for a given group.
 	 * Throws an exception if the group is unknown.
 	 * Promise is called all logpoints are set.
-	 * Override and assert if logpoints are not supported.
+	 * Override and assertion if logpoints are not supported.
 	 * @param group The group to enable/disable. If undefined: all groups. E.g. "UNITTEST".
 	 * @param enable true=enable, false=disable.
 	 */
-	public async enableLogpointGroup(group: string, enable: boolean): Promise<void> {
+	public async enableLogpointGroup(group: string|undefined, enable: boolean): Promise<void> {
 		let lPoints;
 
 		// Check if one group or all
@@ -1145,7 +1109,7 @@ export class RemoteBase extends EventEmitter {
 	 * Takes also the disassembled file into account.
 	 * Used e.g.for the call stack.
 	 * @param address The memory address to search for.
-	 * @returns The associated filename and line number(and for sjasmplus the modulePrefix and the lastLabel).
+	 * @returns The associated filename and line number (and for sjasmplus the modulePrefix and the lastLabel).
 	 */
 	public getFileAndLineForAddress(address: number): SourceFileEntry {
 		// Now search last line with that pc
@@ -1250,11 +1214,27 @@ export class RemoteBase extends EventEmitter {
 
 	/**
 	 * Reads the memory pages, i.e. the slot/banks relationship from zesarux
-	 * and converts it to an arry of MemoryBanks.
-	 * @returns A Promise with an array with the available memory pages.
+	 * and converts it to an array of MemoryBanks.
+	 * @returns A Promise with an array with the available memory pages. Contains start and end address
+	 * and a name.
 	 */
 	public async getMemoryBanks(): Promise<MemoryBank[]> {
-		return [];
+		// Get the slots
+		const slots=this.getSlots();
+		// Convert
+		const pages=this.memoryModel.getMemoryBanks(slots);
+		// Return
+		return pages;
+	}
+
+
+
+	/**
+	 * Reads the slots/banks association.
+	 * @returns A Promise with a slot array containing the refernced banks or undefined if no slots are used.
+	 */
+	public getSlots(): number[]|undefined {
+		return Z80Registers.getSlots();
 	}
 
 
@@ -1264,10 +1244,7 @@ export class RemoteBase extends EventEmitter {
 	 */
 	public async setProgramCounterWithEmit(address: number): Promise<void> {
 		StepHistory.clear();
-		Z80Registers.clearCache();
-		this.clearCallStack();
-		await this.setRegisterValue("PC", address);
-		this.emit('stoppedEvent', 'PC changed');
+		await this.setRegisterValueWithEmit('PC', address);
 	}
 
 	/**
@@ -1276,10 +1253,7 @@ export class RemoteBase extends EventEmitter {
 	 */
 	public async setStackPointerWithEmit(address: number): Promise<void> {
 		StepHistory.clear();
-		Z80Registers.clearCache();
-		this.clearCallStack();
-		await this.setRegisterValue("SP", address);
-		this.emit('stoppedEvent', 'SP changed');
+		await this.setRegisterValueWithEmit('SP', address);
 	}
 
 
@@ -1292,8 +1266,9 @@ export class RemoteBase extends EventEmitter {
 	 * @param value The new register value.
 	 */
 	public async setRegisterValueWithEmit(register: string, value: number) {
-		this.clearCallStack();
 		await this.setRegisterValue(register, value);
+		await this.getRegistersFromEmulator();
+		await this.getCallStackFromEmulator();
 		this.emit('stoppedEvent', register+' changed');
 	}
 
@@ -1368,7 +1343,7 @@ export class RemoteBase extends EventEmitter {
 
 	/**
 	 * Retrieves the sprites clipping window from the emulator.
-	 * @returns A Promise that returns the clipping dimensions and teh control byte(xl, xr, yt, yb, control).
+	 * @returns A Promise that returns the clipping dimensions and the control byte(xl, xr, yt, yb, control).
 	 */
 	public async getTbblueSpritesClippingWindow(): Promise<{xl: number, xr: number, yt: number, yb: number, control: number}> {
 		return {xl: 0, xr: 0, yt: 0, yb: 0, control: 0};
@@ -1404,7 +1379,7 @@ export class RemoteBase extends EventEmitter {
 	 * @param timeout Timeout in ms. For this time traffic has to be quiet.
 	 * @returns A Promise called after being quiet for the given timeout.
 	 */
-	public async executeAfterBeingQuietFor(timeout: number): Promise<void> {
+	public async waitForBeingQuietFor(timeout: number): Promise<void> {
 		// This is a hack for ZEsarUX. Not required for the others.
 	}
 
@@ -1438,6 +1413,9 @@ export class RemoteBase extends EventEmitter {
 	 * But for branching or conditional branching instructions this is different.
 	 * DeZog will then use up to 2 breakpoints to catch up after the instruction is executed.
 	 * The method is async, i.e. it fetches the required registers and memory on it's own.
+	 * Note: The method uses normal 64k addresses, no long addresses.
+	 * This because long addresses are not required and there is some arithmetic
+	 * done to the addresses (e.g. +3) that is not available on long addresses.
 	 * @param stepOver true if breakpoint address should be calculate for a step-over.
 	 * In this case the branching is ignored for CALL and RST.
 	 * @returns A Promise with the opcode and 2 breakpoint
@@ -1445,10 +1423,12 @@ export class RemoteBase extends EventEmitter {
 	 * The first always points directly after the address or for unconditional jumps/calls
 	 * it points to the jump address.
 	 * The 2nd of these bp addresses can be undefined.
+	 * Note: the breakpoints returned here are always 64k addresses,
+	 * i.e. no long addresses.
 	 */
 	protected async calcStepBp(stepOver: boolean): Promise<[Opcode, number, number?]> {
 		// Make sure the registers are there
-		await this.getRegisters();
+		//await this.getRegisters();
 		const pc=this.getPC();
 		// Get opcodes
 		const opcodes=await this.readMemoryDump(pc, 4);
@@ -1542,6 +1522,11 @@ export class RemoteBase extends EventEmitter {
 					bpAddr2=pc;
 			}
 		}
+
+		// Make sure that breakpoints wrap around
+		bpAddr1&=0xFFFF;
+		if (bpAddr2)
+			bpAddr2&=0xFFFF;
 
 		// Return either 1 or 2 breakpoints
 		return [opcode, bpAddr1, bpAddr2];

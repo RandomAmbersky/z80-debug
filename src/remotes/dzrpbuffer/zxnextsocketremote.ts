@@ -1,5 +1,4 @@
 import {LogSocket} from '../../log';
-import {DZRP} from '../dzrp/dzrpremote';
 import {DzrpBufferRemote, CONNECTION_TIMEOUT} from './dzrpbufferremote';
 import {Socket} from 'net';
 import {Settings} from '../../settings';
@@ -7,6 +6,7 @@ import {Utility} from '../../misc/utility';
 import {BREAK_REASON_NUMBER} from '../remotebase';
 import {GenericBreakpoint} from '../../genericwatchpoint';
 import {Opcode, OpcodeFlag} from '../../disassembler/opcode';
+import {Z80Registers} from '../z80registers';
 
 
 
@@ -54,6 +54,11 @@ export class ZxNextSocketRemote extends DzrpBufferRemote {
 	protected msgStartByteFound: boolean;
 
 
+	// The time the last CMD_CONTINUE was sent. Is used to suppress the "No response received message" from the remote if a request is sent from vscode right after a CMD_CONTINUE.
+	protected lastCmdContinueTime = 0;	// ms
+	protected cmdContinueNoResponseErrorTime = 1000;	// ms
+
+
 	/// Constructor.
 	constructor() {
 		super();
@@ -74,7 +79,7 @@ export class ZxNextSocketRemote extends DzrpBufferRemote {
 		this.socket.on('connect', async () => {
 			LogSocket.log('ZxNextSocketRemote: Connected to server!');
 
-			this.receivedData=new Buffer(0);
+			this.receivedData=Buffer.alloc(0);
 			this.msgStartByteFound=false;
 			this.expectedLength=4;	// for length
 			this.receivingHeader=true;
@@ -118,6 +123,45 @@ export class ZxNextSocketRemote extends DzrpBufferRemote {
 				resolve();
 			});
 		});
+	}
+
+
+	/**
+	 * Note:
+	 * This is like the super class implementation except that it suppresses a warning message.
+	 * If F5 (CONTINUE) or F10 etc. is pressed rapidly or held down it may happen that a request
+	 * (e.g. memory request) is done after CMD_CONTINUE has been sent. Due to some asynchronous
+	 * requests from vscode.
+	 * Normally this is not a problem, the remote would just answer the request.
+	 * For the ZXNext UART serial protocol this is different.
+	 * The UART is not accessible when the Z80 program is being run. This is because the 'dezogif'
+	 * program does not check the UART for new data when run and because the Joystick ports are
+	 * remapped to serve as joystick ports and not as UART ports when the program is being run.
+	 * Thus, the ZX Next is not able to receive and not able to respond.
+	 * Furthermore if the user now changes e.g. a register or memory content there should be
+	 * feedback that this is not possible.
+	 * On the other hand the "automatic" requests from vscode should be suppressed.
+	 * As there is no way to distinguish it is done with a time guardian.
+	 * I.e about one second after the CMD_CONTINUE was sent no warning is emitted.
+	 * Otherwise the warning is shown.
+	 */
+	protected startCmdRespTimeout(respTimeoutTime: number) {
+		this.stopCmdRespTimeout();
+		this.cmdRespTimeout = setTimeout(() => {
+			this.stopCmdRespTimeout();
+			const err = new Error('No response received from remote. A simple reason for this message is that the ZX Next is running the debugged program and cannot answer. In that case press the yellow NMI button on the ZX Next to pause execution.');
+			// Log
+			LogSocket.log('Warning: ' + err.message);
+			// Show warning (only if a few moments have gone after the last CMD_CONTINUE)
+			const timeSpan = (Date.now() - this.lastCmdContinueTime);	// In ms
+			if (timeSpan>this.cmdContinueNoResponseErrorTime)
+				this.emit('warning', err.message);
+			// Remove message / Queue next message
+			const msg = this.messageQueue.shift()!;
+			this.sendNextMessage();
+			// Pass error data to right consumer
+			msg.reject(err);
+		}, respTimeoutTime);
 	}
 
 
@@ -305,6 +349,7 @@ export class ZxNextSocketRemote extends DzrpBufferRemote {
 			// Catch resolve method to store the breakpoint ID.
 			Utility.assert(this.continueResolve);
 			this.continueResolve=resolveWithBp;
+			this.lastCmdContinueTime = Date.now();
 			await super.sendDzrpCmdContinue(bp1Address, bp2Address);
 		}
 		else {
@@ -330,6 +375,7 @@ export class ZxNextSocketRemote extends DzrpBufferRemote {
 					// Restore the breakpoint (the other breakpoints are already set)
 					oldOpcode=await this.sendDzrpCmdSetBreakpoints([oldBreakedAddress]);
 					// Continue
+					this.lastCmdContinueTime = Date.now();
 					await super.sendDzrpCmdContinue(bp1Address, bp2Address);
 				}
 			};
@@ -338,59 +384,15 @@ export class ZxNextSocketRemote extends DzrpBufferRemote {
 			let [, tmpBp1Addr, tmpBp2Addr]=await this.calcStepBp(false /*step-into*/);
 
 			// Step
+			this.lastCmdContinueTime = Date.now();
 			await super.sendDzrpCmdContinue(tmpBp1Addr, tmpBp2Addr);
 		}
 	}
 
 
 	/**
-	 * Sends the command to set all breakpoints.
-	 * For the ZXNext all breakpoints are set at once just before the
-	 * next 'continue' is executed.
-	 * @param bpAddresses The breakpoint addresses. Each 0x0000-0xFFFF.
-	 * @returns A Promise with the memory contents from each breakpoint address.
-	 */
-	protected async sendDzrpCmdSetBreakpoints(bpAddresses: Array<number>): Promise<Array<number>> {
-		// Create buffer from array
-		const count=bpAddresses.length;
-		const buffer=Buffer.alloc(2*count);
-		let i=0;
-		for (const addr of bpAddresses) {
-			buffer[i++]=addr&0xFF;
-			buffer[i++]=(addr>>>8)&0xFF;
-		}
-		const opcodes=await this.sendDzrpCmd(DZRP.CMD_SET_BREAKPOINTS, buffer);
-		return [...opcodes];
-	}
-
-
-	/**
-	 * Sends the command to restore the memory for all breakpoints.
-	 * This is send just after the 'continue' command.
-	 * So that the user only sees correct memory contents even if doing
-	 * a disassembly or memory read.
-	 * It is also required otherwise the breakpoints in 'calcStep' are not correctly
-	 * calculated.
-	 * @param elems The addresses + memory content.
-	 */
-	protected async sendDzrpCmdRestoreMem(elems: Array<{address: number, value: number}>): Promise<void> {
-		// Create buffer from array
-		const count=elems.length;
-		const buffer=Buffer.alloc(3*count);
-		let i=0;
-		for (const elem of elems) {
-			const addr=elem.address;
-			buffer[i++]=addr&0xFF;
-			buffer[i++]=(addr>>>8)&0xFF;
-			buffer[i++]=elem.value;
-		}
-		await this.sendDzrpCmd(DZRP.CMD_RESTORE_MEM, buffer);
-	}
-
-
-	/**
 	 * Stores the breakpoints in a list.
-	 * This includes the breakpoints set for ASSERTs and LOGPOINTs.
+	 * This includes the breakpoints set for ASSERTIONs and LOGPOINTs.
 	 * The breakpoints are later sent all at once with CMD_SET_BREAKPOINTS.
 	 * @param bp The breakpoint. sendDzrpCmdAddBreakpoint will set bp.bpId with the breakpoint
 	 * ID. If the breakpoint could not be set it is set to 0.
@@ -479,19 +481,17 @@ export class ZxNextSocketRemote extends DzrpBufferRemote {
 	 * If not allowed: a string with the address range that can be used for
 	 * error output.
 	 */
-	protected async checkBreakpoint(addr: number|undefined): Promise<string|undefined> {
-		if (addr!=undefined) {
+	protected async checkBreakpoint(addr: number | undefined): Promise<string | undefined> {
+		if (addr != undefined) {
 			// Check for ROM
-			if (addr>=0&&addr<0x4000) {
-				const slots=await this.sendDzrpCmdGetSlots();
-				const slot=addr>>>13;
-				if (slots[slot]>=0xFE)	// ROM
-					return "ROM";
-			}
+			const bank = Z80Registers.getBankFromAddress(addr);
+			if (bank >= 0xFE)	// ROM
+				return "ROM";
 
 			// Check for special area
-			if ((addr>=0&&addr<=0x07)
-				||(addr>=0x66&&addr<=0x73))
+			const addr64k = addr & 0xFFFF;
+			if ((addr64k >= 0 && addr64k <= 0x07)
+				|| (addr64k >= 0x66 && addr64k <= 0x73))
 				return "addresses 0x0000-0x0007 and 0x0066-0x0073";
 		}
 		return undefined;
@@ -502,12 +502,7 @@ export class ZxNextSocketRemote extends DzrpBufferRemote {
 	 * This command is not used anymore. Use the NMI button instead.
 	 */
 	protected async sendDzrpCmdPause(): Promise<void> {
-		try {
-			await super.sendDzrpCmdPause();
-		}
-		catch {
-			throw Error("To pause execution use the yellow NMI button of the ZX Next.");
-		}
+		throw Error("To pause execution use the yellow NMI button of the ZX Next.");
 	}
 
 

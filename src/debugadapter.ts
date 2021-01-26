@@ -1,16 +1,16 @@
 import * as fs from 'fs';
-import {basename} from 'path';
+import {UnifiedPath} from './misc/unifiedpath';
 import * as vscode from 'vscode';
-import { /*Handles,*/ Breakpoint /*, OutputEvent*/, DebugSession, InitializedEvent, Scope, Source, StackFrame, StoppedEvent, TerminatedEvent, /*BreakpointEvent,*/ /*OutputEvent,*/ Thread, ContinuedEvent, CapabilitiesEvent} from 'vscode-debugadapter/lib/main';
+import {Breakpoint, DebugSession, InitializedEvent, Scope, Source, StackFrame, StoppedEvent, TerminatedEvent, Thread, ContinuedEvent, CapabilitiesEvent} from 'vscode-debugadapter/lib/main';
 import {DebugProtocol} from 'vscode-debugprotocol/lib/debugProtocol';
 import {Labels} from './labels/labels';
-import {Log, LogSocket} from './log';
+import {Log} from './log';
 import {RemoteBreakpoint} from './remotes/remotebase';
 import {MemoryDumpView} from './views/memorydumpview';
 import {MemoryRegisterView} from './views/memoryregisterview';
 import {RefList} from './misc/refList';
 import {Settings, SettingsParameters} from './settings';
-import { /*ShallowVar,*/ DisassemblyVar, MemorySlotsVar as MemorySlotsVar, LabelVar, RegistersMainVar, RegistersSecondaryVar, StackVar} from './variables/shallowvar';
+import {DisassemblyVar, MemorySlotsVar as MemorySlotsVar, LabelVar, RegistersMainVar, RegistersSecondaryVar, StackVar /*, StructVar*/} from './variables/shallowvar';
 import {Utility} from './misc/utility';
 import {Z80RegisterHoverFormat, Z80RegisterVarFormat, Z80RegistersClass, Z80Registers,} from './remotes/z80registers';
 import {RemoteFactory, Remote} from './remotes/remotefactory';
@@ -21,9 +21,8 @@ import {ZxNextSpritePatternsView} from './views/zxnextspritepatternsview';
 import {MemAttribute} from './disassembler/memory';
 import {Decoration} from './decoration';
 import {ShallowVar} from './variables/shallowvar';
-//import {SerialFake} from './remotes/zxnext/serialfake';
-import {ZxSimulationView} from './remotes/zxsimulator/zxsimulationview';
-import {ZxSimulatorRemote} from './remotes/zxsimulator/zxsimremote';
+import {ZSimulationView} from './remotes/zsimulator/zsimulationview';
+import {ZSimRemote} from './remotes/zsimulator/zsimremote';
 import {CpuHistoryClass, CpuHistory, StepHistory} from './remotes/cpuhistory';
 import {StepHistoryClass} from './remotes/stephistory';
 import {DisassemblyClass, Disassembly} from './misc/disassembly';
@@ -35,7 +34,7 @@ import {Z80UnitTests} from './z80unittests';
 
 
 /// State of the debug adapter.
-enum DbgAdaperState {
+enum DbgAdapterState {
 	NORMAL,	// Normal debugging
 	UNITTEST,	// Debugging or running unit tests
 }
@@ -47,7 +46,7 @@ enum DbgAdaperState {
  */
 export class DebugSessionClass extends DebugSession {
 	/// The state of the debug adapter (unit tests or not)
-	protected static state=DbgAdaperState.NORMAL;
+	protected static state=DbgAdapterState.NORMAL;
 
 	/// The address queue for the disassembler. This contains all stepped addresses.
 	protected dasmAddressQueue=new Array<number>();
@@ -68,7 +67,7 @@ export class DebugSessionClass extends DebugSession {
 	/// unit tests are running and to emit events to the caller.
 	protected static unitTestHandler: ((da: DebugSessionClass) => void)|undefined;
 
-	/// This array contains functions which are pushed on an emit (e.g. 'historySpot', not 'codeCoverage')
+	/// This array contains functions which are pushed on an emit (e.g. 'historySpot', not 'coverage')
 	/// and which are executed after a stackTrace.
 	/// The reason is that the disasm.asm file will not exist before and emits
 	/// regarding this file would be lost.
@@ -86,13 +85,16 @@ export class DebugSessionClass extends DebugSession {
 	/// This variable here is set every time a step (or similar) is done.
 	/// And reset when the function is finished. Should some other similar
 	/// request happen a response is send but the request is ignored otherwise.
-	protected proccessingSteppingRequest=false;
+	protected processingSteppingRequest=false;
 
 
-	/// This is saved text that could notbe printed yet because
+	/// This is saved text that could not be printed yet because
 	// the debug console was not there.
-	// It is printed a sson as the console appears.
-	protected debugConsoleSavedText;
+	// It is printed a soon as the console appears.
+	protected debugConsoleSavedText: string;
+
+	/// The text written to console on event 'debug_console' is indented by this amount.
+	protected debugConsoleIndentation="  ";
 
 
 	/**
@@ -101,10 +103,6 @@ export class DebugSessionClass extends DebugSession {
 	 */
 	public constructor() {
 		super();
-
-		// Start logging
-		Log.clear();
-		LogSocket.clear();
 
 		// Init line numbering
 		this.setDebuggerLinesStartAt1(false);
@@ -152,7 +150,7 @@ export class DebugSessionClass extends DebugSession {
 		// Return if currently a debug session is running
 		if (vscode.debug.activeDebugSession)
 			return false;
-		if (this.state!=DbgAdaperState.NORMAL)
+		if (this.state!=DbgAdapterState.NORMAL)
 			return false;
 
 		// Start debugger
@@ -160,7 +158,7 @@ export class DebugSessionClass extends DebugSession {
 		let wsFolder;
 		if (vscode.workspace.workspaceFolders)
 			wsFolder=vscode.workspace.workspaceFolders[0];
-		this.state=DbgAdaperState.UNITTEST;
+		this.state=DbgAdapterState.UNITTEST;
 		vscode.debug.startDebugging(wsFolder, configName);
 
 		return true;
@@ -213,7 +211,7 @@ export class DebugSessionClass extends DebugSession {
 	 */
 	public terminate(message?: string) {
 		(async () => {
-			DebugSessionClass.state=DbgAdaperState.NORMAL;
+			//DebugSessionClass.state=DbgAdapterState.NORMAL;
 			if (message)
 				this.showError(message);
 			Log.log("Exit debugger!");
@@ -272,7 +270,7 @@ export class DebugSessionClass extends DebugSession {
 
 
 	/**
-	 * Debugadapter disconnects.
+	 * DebugAdapter disconnects.
 	 * End forcefully.
 	 * Is called
 	 * - when user presses red square
@@ -281,8 +279,23 @@ export class DebugSessionClass extends DebugSession {
 	 * - If user presses circled arrow/restart.
 	 */
 	protected async disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments): Promise<void> {
+		// Disconnect Remote etc.
+		this.disconnectAll();
+		// Send response
+		this.sendResponse(response);
+	}
+
+
+	/**
+	 * Disconnects Remote, listeners, views.
+	 * Is called
+	 * - when user presses red square
+	 * - when the user presses relaunch (circled arrow/restart)
+	 * - when the ZEsarUX socket connection is terminated
+	 */
+	protected async disconnectAll(): Promise<void> {
 		// Clear all decorations
-		if (DebugSessionClass.state==DbgAdaperState.UNITTEST) {
+		if (DebugSessionClass.state==DbgAdapterState.UNITTEST) {
 			// Cancel unit tests
 			Z80UnitTests.cancelUnitTests();
 			// Clear decoration
@@ -290,8 +303,8 @@ export class DebugSessionClass extends DebugSession {
 		}
 		else
 			Decoration?.clearAllDecorations();
-		DebugSessionClass.state=DbgAdaperState.NORMAL;
-		// Close register memory view
+		DebugSessionClass.state=DbgAdapterState.NORMAL;
+		// Close views, e.g. register memory view
 		BaseView.staticCloseAll();
 		this.removeListener('update', BaseView.staticCallUpdateFunctions);
 		// Stop machine
@@ -302,8 +315,13 @@ export class DebugSessionClass extends DebugSession {
 		CpuHistoryClass.removeCpuHistory();
 		// Clear Remote
 		RemoteFactory.removeRemote();
-		// Send response
-		this.sendResponse(response);
+		// Remove disassembly text editor. vscode does not support closing directly, thus this hack:
+		if (this.disasmTextDoc) {
+			vscode.window.showTextDocument(this.disasmTextDoc.uri, {preview: true, preserveFocus: false})
+				.then(() => {
+					return vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+				});
+		}
 	}
 
 
@@ -328,7 +346,11 @@ export class DebugSessionClass extends DebugSession {
 
 		// The PC value might be changed.
 		//response.body.supportsGotoTargetsRequest = true;
-		response.body.supportsGotoTargetsRequest=false;	// I use my own "Move Program Counter to Cursor"
+		// I use my own "Move Program Counter to Cursor".
+		// GotoTargetsRequest would be working now, but not in all cases.
+		// If the file is not recognized yet. It does not work.
+		// Thought it has something to do with loadSourcesRequest but it doesn't.
+		response.body.supportsGotoTargetsRequest=false;
 
 		// Support hovering over values (registers)
 		response.body.supportsEvaluateForHovers=true;
@@ -356,10 +378,11 @@ export class DebugSessionClass extends DebugSession {
 	 */
 	protected async restartRequest(response: DebugProtocol.RestartResponse, args: DebugProtocol.RestartArguments): Promise<void> {
 		// Stop machine
-		Remote.disconnect().then(() => {
+		await this.disconnectAll();
+		//Remote.disconnect().then(() => {
 			// And setup a new one
 			this.launch(response);
-		});
+		//});
 	}
 
 
@@ -420,7 +443,7 @@ export class DebugSessionClass extends DebugSession {
 		});
 
 		// Launch emulator
-		this.launch(response);
+		await this.launch(response);
 	}
 
 
@@ -429,12 +452,12 @@ export class DebugSessionClass extends DebugSession {
 	 * @param response
 	 */
 	protected async launch(response: DebugProtocol.Response) {
-		DebugSessionClass.state=DbgAdaperState.NORMAL;
+		DebugSessionClass.state=DbgAdapterState.NORMAL;
 		// Setup the disassembler
 		DisassemblyClass.createDisassemblyInstance();
 
 		// Init
-		this.proccessingSteppingRequest=false;
+		this.processingSteppingRequest=false;
 
 		// Start the emulator and the connection.
 		const msg=await this.startEmulator();
@@ -460,8 +483,8 @@ export class DebugSessionClass extends DebugSession {
 	 */
 	protected async startEmulator(): Promise<string|undefined> {
 		try {
-			// init labels
-			Labels.init();
+			// Init labels
+			Labels.init(Settings.launch.smallValuesMaximum);
 		}
 		catch (e) {
 			// Some error occurred
@@ -471,7 +494,7 @@ export class DebugSessionClass extends DebugSession {
 
 		// Call the unit test handler. It will subscribe on events.
 		if (DebugSessionClass.unitTestHandler) {
-			DebugSessionClass.state=DbgAdaperState.UNITTEST;
+			DebugSessionClass.state=DbgAdapterState.UNITTEST;
 			DebugSessionClass.unitTestHandler(this);
 		}
 
@@ -487,17 +510,36 @@ export class DebugSessionClass extends DebugSession {
 		// Create the Remote
 		RemoteFactory.createRemote(Settings.launch.remoteType);
 
+		Remote.on('warning', message => {
+			// Some problem occurred
+			this.showWarning(message);
+		});
+
+		Remote.on('debug_console', message => {
+			// Show the message in the debug console
+			this.debugConsoleIndentedText(message);
+		});
+
+		Remote.once('error', err => {
+			// Some error occurred
+			this.terminate(err.message);
+		});
+
+		Remote.once('terminated', () => {
+			// Emulator has been terminated (e.g. by unit tests)
+			this.terminate();
+		});
+
 		// Check if a cpu history object has been created by the Remote.
 		if (!(CpuHistory as any)) {
 			// If not create a lite (step) history
 			CpuHistoryClass.setCpuHistory(new StepHistoryClass());
-			StepHistory.decoder=Z80Registers.decoder;
 		}
 
 		// Load files
 		try {
-			// Reads the list file and also retrieves all occurrences of WPMEM, ASSERT and LOGPOINT.
-			Remote.readListFiles(Settings.launch.listFiles);
+			// Reads the list file and also retrieves all occurrences of WPMEM, ASSERTION and LOGPOINT.
+			Remote.readListFiles(Settings.launch);
 		}
 		catch (err) {
 			// Some error occurred during loading, e.g. file not found.
@@ -527,49 +569,37 @@ export class DebugSessionClass extends DebugSession {
 			});
 		});
 
-		StepHistory.on('historySpot', (startIndex, addresses) => {
+		StepHistory.on('historySpot', (startIndex, addresses, registers) => {
 			// addresses: All addresses of the history spot.
 			this.delayedDecorations.push(() => {
 				// Short history addresses
-				Decoration.showHistorySpot(startIndex, addresses);
+				Decoration.showHistorySpot(startIndex, addresses, registers);
 			});
-		});
-
-		Remote.on('warning', message => {
-			// Some problem occurred
-			this.showWarning(message);
-		});
-
-		Remote.on('log', message => {
-			// Show the log (from the socket/ZEsarUX) in the debug console
-			this.debugConsoleAppendLine("Log: "+message);
-		});
-
-		Remote.once('error', err => {
-			// Some error occurred
-			this.terminate(err.message);
-		});
-
-		Remote.once('terminated', () => {
-			// Emulator has been terminated (e.g. by unit tests)
-			this.terminate();
 		});
 
 		return new Promise<undefined>(async resolve => {	// For now there is no unsuccessful (reject) execution
 			Remote.once('initialized', async (text) => {
-				// Print text if available, e.g. "dbg_uart_if initilaized".
+				// Print text if available, e.g. "dbg_uart_if initialized".
 				if (text) {
 					this.debugConsoleAppendLine(text);
 				}
 
+				// Get initial registers
+				await Remote.getRegistersFromEmulator();
+				await Remote.getCallStackFromEmulator();
+
 				// Initialize Cpu- or StepHistory.
+				if (!StepHistory.decoder)
+					StepHistory.decoder=Z80Registers.decoder;
 				StepHistory.init();
 
 				// Create memory/register dump view
-				let registerMemoryView=new MemoryRegisterView();
+				const registerMemoryView=new MemoryRegisterView();
 				const regs=Settings.launch.memoryViewer.registersMemoryView;
 				registerMemoryView.addRegisters(regs);
 				await registerMemoryView.update();
+
+
 
 				// Run user commands after load.
 				for (const cmd of Settings.launch.commandsAfterLaunch) {
@@ -590,8 +620,8 @@ export class DebugSessionClass extends DebugSession {
 				// there would be a dependency in RemoteFactory to vscode which in turn /// makes problems for the Unittests.
 				if (Settings.launch.remoteType=="zsim") {
 					// Adds a window that displays the ZX screen.
-					const remote=Remote as ZxSimulatorRemote;
-					ZxSimulationView.SimulationViewFactory(remote);
+					const remote=Remote as ZSimRemote;
+					ZSimulationView.SimulationViewFactory(remote);
 				}
 
 				// Socket is connected, allow setting breakpoints
@@ -603,7 +633,7 @@ export class DebugSessionClass extends DebugSession {
 				StepHistory.clear();
 				if (DebugSessionClass.unitTestHandler) {
 					// Handle continue/stop in the z80unittests.
-					this.emit("initialized");
+					this.emit('initialized');
 				}
 				else {
 					if (Settings.launch.startAutomatically) {
@@ -612,8 +642,6 @@ export class DebugSessionClass extends DebugSession {
 						setTimeout(() => {
 							// Delay call because the breakpoints are set afterwards.
 							this.handleRequest(undefined, async () => {
-								// Check if lite history need to be stored.
-								this.checkAndStoreLiteHistory();
 								// Normal operation
 								return await this.remoteContinue();
 							});
@@ -627,13 +655,14 @@ export class DebugSessionClass extends DebugSession {
 				DebugSessionClass.unitTestHandler=undefined;
 			});
 
-			// Inititalize Remote
+			// Initialize Remote
 			try {
 				await Remote.init();
 			}
 			catch (e) {
 				// Some error occurred
-				this.terminate('Init remote: '+e.message);
+				const error=e.message||"Error";
+				this.terminate('Init remote: '+error);
 			}
 		});
 	}
@@ -645,8 +674,7 @@ export class DebugSessionClass extends DebugSession {
 	 * @param args lines=array with line numbers. source.path=the file path
 	 */
 	protected async setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): Promise<void> {
-
-		const path=<string>args.source.path;
+		const path=UnifiedPath.getUnifiedPath(<string>args.source.path);
 
 		// convert breakpoints
 		const givenBps=args.breakpoints||[];
@@ -654,8 +682,7 @@ export class DebugSessionClass extends DebugSession {
 		for (const bp of givenBps) {
 			try {
 				const log=Remote.evalLogMessage(bp.logMessage);
-				var mbp: RemoteBreakpoint;
-				mbp={
+				const mbp: RemoteBreakpoint= {
 					bpId: 0,
 					filePath: path,
 					lineNr: this.convertClientLineToDebugger(bp.line),
@@ -667,7 +694,7 @@ export class DebugSessionClass extends DebugSession {
 			}
 			catch (e) {
 				// Show error
-				this.showWarning(e);
+				this.showWarning(e.message);
 			}
 		}
 
@@ -691,12 +718,12 @@ export class DebugSessionClass extends DebugSession {
 			// Create vscode breakpoint with verification
 			const verified=(foundCbp!=undefined)&&(foundCbp.address>=0);
 			const bp=new Breakpoint(verified, lineNr, 0, source);
-			if (foundCbp) {
+			if (foundCbp && foundCbp.address>=0) {
 				// Add address to source name.
-				const addrString=Utility.getHexString(foundCbp.address, 4)+'h';
+				const addrString = Utility.getLongAddressString(foundCbp.address);
 				// Add hover text
 				let txt=addrString;
-				const labels=Labels.getLabelsForNumber(foundCbp.address);
+				const labels=Labels.getLabelsForNumber64k(foundCbp.address);
 				labels.map(lbl => txt+='\n'+lbl);
 				(bp as any).message=txt;
 			}
@@ -741,9 +768,11 @@ export class DebugSessionClass extends DebugSession {
 	private createSource(filePath: string): Source|undefined {
 		if (filePath.length==0)
 			return undefined;
-		const fname=basename(filePath);
-		const debPath=this.convertDebuggerPathToClient(filePath);
-		return new Source(fname, debPath, undefined, undefined, undefined);
+		const uFilePath=UnifiedPath.getUnifiedPath(filePath);
+		const fname=UnifiedPath.basename(uFilePath);
+		const debPath=this.convertDebuggerPathToClient(uFilePath);
+		const uDebPath=UnifiedPath.getUnifiedPath(debPath);
+		return new Source(fname, uDebPath, undefined, undefined, undefined);
 	}
 
 
@@ -769,10 +798,16 @@ export class DebugSessionClass extends DebugSession {
 
 		// Get the call stack trace.
 		let callStack;
-		if (StepHistory.isInStepBackMode())
+		//let slots;
+		if (StepHistory.isInStepBackMode()) {
+			// Get callstack
 			callStack=StepHistory.getCallStack();
-		else
-			callStack=await Remote.getCallStack();
+		}
+		else {
+			// Get callstack
+			callStack=await Remote.getCallStackCache();
+		}
+
 		// Go through complete call stack and get the sources.
 		// If no source exists than get a hexdump and disassembly later.
 		frameCount=callStack.length;
@@ -821,9 +856,9 @@ export class DebugSessionClass extends DebugSession {
 		const fetchAddressesCount=fetchAddresses.length;
 
 		if (!doDisassembly) {
-			const checkSize=40;	// Needs to be smaller than fetchsize in order not to do a disassembly too often.
+			const checkSize=40;	// Needs to be smaller than fetch-size in order not to do a disassembly too often.
 			if (fetchAddressesCount>0) {
-				// Now get hexdumps for all non existing sources.
+				// Now get hex-dumps for all non existing sources.
 				for (let index=0; index<fetchAddressesCount; index++) {
 					// So fetch a memory dump
 					const fetchAddress=fetchAddresses[index];
@@ -831,9 +866,9 @@ export class DebugSessionClass extends DebugSession {
 					// since it was fetched at the beginning.
 					// Check if memory changed.
 					for (let k=0; k<checkSize; k++) {
-						const val=Disassembly.memory.getValueAt(fetchAddress+k);
+						const val=Disassembly.memory.getValueAt((fetchAddress+k)&0xFFFF);
 						const memAttr=Disassembly.memory.getAttributeAt(fetchAddress+k);
-						const newVal=memArray.getValueAtAddress(fetchAddress+k);
+						const newVal=memArray.getValueAtAddress((fetchAddress+k)&0xFFFF);
 						if ((val!=newVal)||(memAttr==MemAttribute.UNUSED)) {
 							doDisassembly=true;
 							break;
@@ -851,7 +886,7 @@ export class DebugSessionClass extends DebugSession {
 				this.dasmAddressQueue.unshift(addr);
 			// Check if this requires a disassembly
 			if (!doDisassembly) {
-				const memAttr=Disassembly.memory.getAttributeAt(addr);
+				const memAttr=Disassembly.memory.getAttributeAt(addr&0xFFFF);
 				if (!(memAttr&MemAttribute.CODE_FIRST))
 					doDisassembly=true;	// If memory was not the start of an opcode.
 			}
@@ -1015,7 +1050,7 @@ export class DebugSessionClass extends DebugSession {
 		if (StepHistory.isInStepBackMode())
 			frame=StepHistory.getCallStack().getObject(frameId);
 		else {
-			await Remote.getCallStack();	// make sure listFrames exist
+			await Remote.getCallStackCache();	// make sure listFrames exist
 			frame=Remote.getFrame(frameId);
 		}
 		if (!frame) {
@@ -1037,31 +1072,28 @@ export class DebugSessionClass extends DebugSession {
 		const ref2=this.listVariables.addObject(varRegisters2);
 		scopes.push(new Scope("Registers 2", ref2));
 
-		// get address
+		// Get address
 		if (frame) {
 			// use address
-			const addr=frame.addr;
+			const addr=frame.addr&0xFFFF;
 			// Create variable object for Disassembly
-			const varDisassembly=new DisassemblyVar(addr, 8);
+			const varDisassembly=new DisassemblyVar(addr, Settings.launch.disassemblerArgs.numberOfLines);
 			// Add to list and get reference ID
 			const ref=this.listVariables.addObject(varDisassembly);
 			scopes.push(new Scope("Disassembly", ref));
 		}
 
-		// Check if memory pages are suported by Remote
-		//if (Remote.supportsZxNextRegisters) {
 		// Create variable object for MemorySlots
 		const varMemorySlots=new MemorySlotsVar();
 		// Add to list and get reference ID
 		ref=this.listVariables.addObject(varMemorySlots);
-		scopes.push(new Scope("Memory Slots", ref));
-		//}
+		scopes.push(new Scope("Memory", ref));
 
 		// Create variable object for the stack
 		const varStack=new StackVar(frame.stack, frame.stackStartAddress);
 		// Add to list and get reference ID
 		ref=this.listVariables.addObject(varStack);
-		scopes.push(new Scope("Stack", ref));
+		scopes.push(new Scope("Local Stack", ref));
 
 		// Send response
 		response.body={scopes: scopes};
@@ -1086,8 +1118,7 @@ export class DebugSessionClass extends DebugSession {
 		}
 		else {
 			// Return empty list
-			var variables=new Array<DebugProtocol.Variable>();
-			response.body={variables: variables};
+			response.body = {variables: new Array<DebugProtocol.Variable>()};
 		}
 		this.sendResponse(response);
 	}
@@ -1095,33 +1126,14 @@ export class DebugSessionClass extends DebugSession {
 
 	/**
 	 * Decorates the current PC source line with a reason.
-	 * @oaram "Breakpoint fired: PC=811EH" or undefined (prints nothing)
+	 * @param "Breakpoint fired: PC=811EH" or undefined (prints nothing)
 	 */
 	public decorateBreak(breakReason: string) {
 		if (!breakReason)
 			return;
 		// Get PC
-		Remote.getRegisters().then(() => {
-			const pc=Remote.getPC();
-			Decoration.showBreak(pc, breakReason);
-		});
-	}
-
-
-	/**
-	 * Checks if lite history is used.
-	 * If so it stores the history.
-	 */
-	protected async checkAndStoreLiteHistory(): Promise<void> {
-		if (!(CpuHistory as any)) {
-			// Store as (lite step history)
-			// Make sure registers and callstack exist.
-			await Remote.getRegisters();
-			const regsCache=Z80Registers.getCache();
-			StepHistory.pushHistoryInfo(regsCache);
-			const callStack=await Remote.getCallStack();
-			StepHistory.pushCallStack(callStack);
-		}
+		const pc=Remote.getPCLong();
+		Decoration.showBreak(pc, breakReason);
 	}
 
 
@@ -1131,7 +1143,7 @@ export class DebugSessionClass extends DebugSession {
 	 */
 	protected startProcessing() {
 		// Start processing
-		this.proccessingSteppingRequest=true;
+		this.processingSteppingRequest=true;
 		// Reset pause request
 		this.pauseRequested=false;
 		// Clear decorations
@@ -1147,7 +1159,7 @@ export class DebugSessionClass extends DebugSession {
 	 */
 	protected stopProcessing() {
 		// Stop processing
-		this.proccessingSteppingRequest=false;
+		this.processingSteppingRequest=false;
 		// Do the same for the Remote
 		Remote.stopProcessing();
 	}
@@ -1160,29 +1172,30 @@ export class DebugSessionClass extends DebugSession {
 	  */
 	public async continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): Promise<void> {
 		this.handleRequest(response, async () => {
+			let event;
+
 			// Check for reverse debugging.
 			if (StepHistory.isInStepBackMode()) {
-
-				this.debugConsoleAppendLine('Continue');
+				await this.startStepInfo('Continue');
 				// Continue
-				const breakReason=StepHistory.continue();
+				const breakReason = await StepHistory.continue();
 
 				// Check for output.
 				if (breakReason) {
-					this.debugConsoleAppendLine(breakReason);
+					this.debugConsoleIndentedText(breakReason);
 					// Show break reason
 					this.decorateBreak(breakReason);
 				}
 				// Send event
-				return new StoppedEvent('step', DebugSessionClass.THREAD_ID);
+				event = new StoppedEvent('step', DebugSessionClass.THREAD_ID);
 			}
 			else {
-				// Check if lite history need to be stored.
-				this.checkAndStoreLiteHistory();
 				// Normal operation
-				const event=await this.remoteContinue();
-				return event;
+				event = await this.remoteContinue();
 			}
+
+			// Return
+			return event;
 		});
 	}
 
@@ -1193,28 +1206,32 @@ export class DebugSessionClass extends DebugSession {
 	 * vscode UI (continueRequest).
 	 */
 	public async remoteContinue(): Promise<StoppedEvent> {
+		await this.startStepInfo('Continue');
+
 		Decoration.clearBreak();
 		StepHistory.clear();
 
-		await this.startStepInfo('Continue');
 		const breakReasonString=await Remote.continue();
 		// It returns here not immediately but only when a breakpoint is hit or pause is requested.
 
-		// Display T-states and time
-		await this.endStepInfo();
+		// Safety check on termination
+		if (Remote == undefined)
+			return new StoppedEvent('exception', DebugSessionClass.THREAD_ID);
 
+		// Display break reason
 		if (breakReasonString) {
 			// Send output event to inform the user about the reason
-			this.debugConsoleAppendLine(breakReasonString);
+			this.debugConsoleIndentedText(breakReasonString);
 
 			// Use reason for break-decoration.
 			this.decorateBreak(breakReasonString);
 		}
 
+		// Display T-states and time
+		await this.endStepInfo();
+
 		// React depending on internal state.
-		if (DebugSessionClass.state==DbgAdaperState.NORMAL) {
-			// Update memory dump etc.
-			await this.update();
+		if (DebugSessionClass.state==DbgAdapterState.NORMAL) {
 			// Send break
 			return new StoppedEvent('break', DebugSessionClass.THREAD_ID);
 		}
@@ -1276,14 +1293,14 @@ export class DebugSessionClass extends DebugSession {
 	protected async reverseContinueRequest(response: DebugProtocol.ReverseContinueResponse, args: DebugProtocol.ReverseContinueArguments): Promise<void> {
 		this.handleRequest(response, async () => {
 			// Output
-			this.debugConsoleAppendLine('Continue reverse');
+			await this.startStepInfo('Reverse-Continue', true);
 
 			// Reverse continue
 			const breakReason=await StepHistory.reverseContinue();
 
 			// Check for output.
 			if (breakReason) {
-				this.debugConsoleAppendLine(breakReason);
+				this.debugConsoleIndentedText(breakReason);
 				// Show break reason
 				this.decorateBreak(breakReason);
 			}
@@ -1294,40 +1311,11 @@ export class DebugSessionClass extends DebugSession {
 
 
 	/**
-	 * Step over.
-	 * Used only by the unit tests.
-	 */
-	public async emulatorOneStepOver(): Promise<void> {
-		StepHistory.clear();
-
-		// Normal Step-Over
-		Z80Registers.clearCache();
-		const result=await Remote.stepOver();
-
-		// Display T-states and time
-		await this.endStepInfo(result.instruction);
-
-		// Update memory dump etc.
-		await this.update({step: true});
-
-		if (result.breakReasonString) {
-			// Output a possible problem
-			this.debugConsoleAppendLine(result.breakReasonString);
-			// Show break reason
-			this.decorateBreak(result.breakReasonString);
-		}
-
-		// Send event
-		this.sendEvent(new StoppedEvent('step', DebugSessionClass.THREAD_ID));
-	}
-
-
-	/**
 	 * Is called by all request (step, stepInto, continue, etc.).
 	 * This handles the display in the vscode UI.
 	 * If the command can be handled in a short amount of time (e.g. in 1 sec)
 	 * then the response is sent after the command.
-	 * When teh response is received by vscode it changed the current highlighted line
+	 * When the response is received by vscode it changed the current highlighted line
 	 * into an unhighlighted state and shows the 'pause' button.
 	 * I.e. for short commands this could lead to flickering, but if the
 	 * UI is changed after command no flickering appears.
@@ -1336,7 +1324,7 @@ export class DebugSessionClass extends DebugSession {
 	 * The function takes care that the response is sent only once.
 	 */
 	protected handleRequest(response: any, command: () => Promise<StoppedEvent>, responseTime=750) {
-		if (this.proccessingSteppingRequest) {
+		if (this.processingSteppingRequest) {
 			// Response is sent immediately if already something else going on
 			this.sendResponse(response);
 			return;
@@ -1362,7 +1350,11 @@ export class DebugSessionClass extends DebugSession {
 			// End processing
 			this.stopProcessing();
 
+			// Update memory dump etc. (also in reverse debug because of the register display)
+			await this.update({step: true});
+
 			// Show decorations
+			//await Remote.getRegisters();
 			StepHistory.emitHistory();
 
 			// Send response
@@ -1386,30 +1378,19 @@ export class DebugSessionClass extends DebugSession {
 	  */
 	protected async nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): Promise<void> {
 		this.handleRequest(response, async () => {
+
+			await this.startStepInfo('Step-Over');
+
 			// T-states info and lite history
 			const stepBackMode=StepHistory.isInStepBackMode();
-			if (stepBackMode) {
-				// Check if Lite history then print
-				if (!(CpuHistory as any))
-					this.debugConsoleAppend('Lite ');
-			}
-			else {
-				await this.startStepInfo();
-				// Check if lite history need to be stored.
-				this.checkAndStoreLiteHistory();
-			}
-
-			// Print
-			this.debugConsoleAppendLine('Step-over');
 
 			// The stepOver should also step over macros, fake instructions, several instruction on the same line.
 			// Therefore the stepOver is repeated until really a new
 			// file/line correspondents to the PC value.
-			Remote.getRegisters();
-			const prevPc=Remote.getPC();
+			//Remote.getRegisters();
+			const prevPc=Remote.getPCLong();
 			const prevFileLoc=Labels.getFileAndLineForAddress(prevPc);
 			let i=0;
-			let instr;
 			let breakReason;
 			const timeWait=new TimeWait(500, 200, 100);
 			while (true) {
@@ -1418,42 +1399,36 @@ export class DebugSessionClass extends DebugSession {
 				// Give vscode some time for a break
 				await timeWait.waitAtInterval();
 
+				// Print instruction
+				const instr=await this.getCurrentInstruction(i);
+				if (instr)
+					this.debugConsoleIndentedText(instr);
+
 				// Check for reverse debugging.
 				if (stepBackMode) {
-					// Stepover
-					const {instruction, breakReasonString}=StepHistory.stepOver();
-					instr=instruction;
-
-					// Check for output.
-					if (breakReasonString) {
-						breakReason=breakReasonString;
-						// Stop
-						break;
-					}
+					// Step-Over
+					breakReason=await StepHistory.stepOver();
 				}
 				else {
 					// Normal Step-Over
-					const result=await Remote.stepOver();
-					instr=result.instruction;
-					// Check for output.
-					if (result.breakReasonString) {
-						breakReason=result.breakReasonString;
-						// Stop
-						break;
-					}
+					breakReason=await Remote.stepOver();
 				}
 
 				// Check for pause request
 				if (this.pauseRequested) {
 					breakReason="Manual break";
+				}
+
+				// Leave loop in case there is a break reason
+				if (breakReason) {
 					// Stop
 					break;
 				}
 
 				// Get new file/line location
-				await Remote.getRegisters();
-				const nextPc=Remote.getPC();
-				const nextFileLoc=Labels.getFileAndLineForAddress(nextPc);
+				//await Remote.getRegisters();
+				const pc=Remote.getPCLong();
+				const nextFileLoc=Labels.getFileAndLineForAddress(pc);
 				// Compare with start location
 				if (prevFileLoc.fileName=='')
 					break;
@@ -1463,29 +1438,18 @@ export class DebugSessionClass extends DebugSession {
 					break;
 			}
 
-			// Multiple instructions
-			if (i>1)
-				instr=undefined;
-
-			// Print instruction
-			if (stepBackMode) {
-				if (instr)
-					this.debugConsoleAppendLine(instr);
-			}
-			else {
-				// Display T-states and time
-				await this.endStepInfo(instr);
-				// Update memory dump etc.
-				await this.update({step: true});
-			}
-
 			// Check for output.
 			if (breakReason) {
 				// Show break reason
-				this.debugConsoleAppendLine(breakReason);
+				this.debugConsoleIndentedText(breakReason);
 				this.decorateBreak(breakReason);
 			}
 
+			// Print T-states
+			if (!stepBackMode) {
+				// Display T-states and time
+				await this.endStepInfo();
+			}
 			// Send event
 			return new StoppedEvent('step', DebugSessionClass.THREAD_ID);
 		}, 100);
@@ -1495,29 +1459,57 @@ export class DebugSessionClass extends DebugSession {
 	/**
 	 * Starts to print the step info. Use in conjunction with 'endStepInfo'.
 	 * Resets the t-states.
-	 * @param mainText E.g. "StepInto"
+	 * Print text to debug console.
+	 * Adds prefix "Time-travel " if in reverse debug mode or alwaysHistorical is true.
+	 * Adds suffix " (Lite)" if no true stepping is done.
+	 * @param text E.g. "Step-into"
+	 * @param alwaysHistorical Prints prefix "Time-travel " even if not (yet) in back step mode.
 	 */
-	protected async startStepInfo(mainText?: string): Promise<void> {
-		if(mainText)
-			this.debugConsoleAppendLine(mainText);
-		// Reset t-states counter
-		await Remote.resetTstates();
+	protected async startStepInfo(text?: string, alwaysHistorical = false): Promise<void> {
+		//Log.log('startStepInfo ->');
+		// Print text
+		const stepBackMode=StepHistory.isInStepBackMode()||alwaysHistorical;
+		if (text) {
+			if (stepBackMode) {
+				text='Time-travel '+text;
+				if (!(CpuHistory as any))
+					text+=' (Lite)';
+			}
+			this.debugConsoleAppendLine(text);
+		}
+
+		// If not in step back mode
+		if (!stepBackMode) {
+			// Checks if lite history is used.
+			// If so, store the history.
+			if (!(CpuHistory as any)) {
+				// Store as (lite step history)
+				const regsCache=Z80Registers.getCache();
+				StepHistory.pushHistoryInfo(regsCache);
+				const callStack=await Remote.getCallStackCache();
+				StepHistory.pushCallStack(callStack);
+			}
+			// Reset t-states counter
+			await Remote.resetTstates();
+		}
+		//Log.log('startStepInfo <-');
 	}
+
 
 	/**
 	 * Prints a text, the disassembly and the used T-states and time to the debug console.
 	 * Assumes that something like "StepInto" has been printed before.
 	 * @param disasm The corresponding disassembly.
 	 */
-	protected async endStepInfo(disasm?: string): Promise<void> {
+	protected async endStepInfo(): Promise<void> {
 		// Get used T-states
 		const tStates=await Remote.getTstates();
-		// Get frequency
-		const cpuFreq=await Remote.getCpuFrequency();
 		// Display T-states and time
 		let tStatesText;
 		if (tStates) {
 			tStatesText='T-States: '+tStates;
+			// Get frequency
+			const cpuFreq=await Remote.getCpuFrequency();
 			if (cpuFreq) {
 				// Time
 				let time=tStates/cpuFreq;
@@ -1538,20 +1530,46 @@ export class DebugSessionClass extends DebugSession {
 			}
 		}
 
-		// Trim
-		if (disasm)
-			disasm=disasm.trim();
-		// Add T-States
-		let output=disasm;
-		if (tStatesText) {
-			if (output)
-				output+='\t; '+tStatesText;
-			else
-				output=tStatesText;
-		}
+		if (tStatesText)
+			this.debugConsoleIndentedText(tStatesText);
+	}
 
-		if(output)
-			this.debugConsoleAppendLine(output);
+
+	/**
+	 * Returns the address and current instruction (at PC) as string.
+	 * Works in step-back and in normal mode.
+	 * Note: Does not retrieve the current PC from the remote.
+	 * @param count Optional. If count is bigger than e.g. 10 only "..." is returned.
+	 * If even bigger, undefined is returned.
+	 * @returns E.g. "8000 LD A,6"
+	 */
+	protected async getCurrentInstruction(count=0): Promise<string|undefined> {
+		const maxInstructionCount=10;
+		const pc=Remote.getPC();
+		const pcStr=Utility.getHexString(pc, 4);
+		// Check if count too high
+		if (count==maxInstructionCount)
+			return pcStr+' ...';
+		if (count>maxInstructionCount)
+			return undefined;
+
+		// Get instruction
+		let disInstr;
+		const stepBackMode=StepHistory.isInStepBackMode();
+		if (stepBackMode) {
+			// Reverse debug mode
+			disInstr=StepHistory.getCurrentInstruction();
+		}
+		else {
+			// Normal mode: Disassemble instruction
+			const data=await Remote.readMemoryDump(pc, 4);
+			disInstr=DisassemblyClass.getInstruction(pc, data);
+		}
+		// Construct result string
+		let result;
+		if (disInstr)
+			result=pcStr+" "+disInstr;
+		return result;
 	}
 
 
@@ -1562,39 +1580,40 @@ export class DebugSessionClass extends DebugSession {
 	  */
 	protected async stepInRequest(response: DebugProtocol.StepInResponse, args: DebugProtocol.StepInArguments): Promise<void> {
 		this.handleRequest(response, async () => {
+
+			await this.startStepInfo('Step-Into');
+
+			// Print instruction
+			const instr=await this.getCurrentInstruction();
+			if (instr)
+				this.debugConsoleIndentedText(instr);
+
 			// Check for reverse debugging.
-			let result;
-			if (StepHistory.isInStepBackMode()) {
-
+			let breakReason;
+			const stepBackMode=StepHistory.isInStepBackMode();
+			if (stepBackMode) {
 				// StepInto
-				result=StepHistory.stepInto();
-				// Print
-				let text='Step-into';
-				if (result.instruction)
-					text+=': '+result.instruction;
-				this.debugConsoleAppendLine(text);
-
+				breakReason=await StepHistory.stepInto();
 			}
 			else {
 				// Step-Into
-				await this.startStepInfo('Step-into');
-				// Check if lite history need to be stored.
-				this.checkAndStoreLiteHistory();
 				StepHistory.clear();
-				result=await Remote.stepInto();
-				// Display info
-				await this.endStepInfo(result.instruction);
-
-				// Update memory dump etc.
-				await this.update({step: true});
+				// Step into
+				breakReason=await Remote.stepInto();
 			}
 
 			// Check for output.
-			if (result.breakReasonString) {
-				this.debugConsoleAppendLine(result.breakReasonString);
+			if (breakReason) {
+				this.debugConsoleIndentedText(breakReason);
 				// Show break reason
-				this.decorateBreak(result.breakReasonString);
+				this.decorateBreak(breakReason);
 			}
+
+			if (!stepBackMode) {
+				// Display info
+				await this.endStepInfo();
+			}
+
 			// Send event
 			return new StoppedEvent('step', DebugSessionClass.THREAD_ID);
 		});
@@ -1608,32 +1627,34 @@ export class DebugSessionClass extends DebugSession {
 	 */
 	protected async stepOutRequest(response: DebugProtocol.StepOutResponse, args: DebugProtocol.StepOutArguments): Promise<void> {
 		this.handleRequest(response, async () => {
+
+			await this.startStepInfo('Step-Out');
+
 			// Check for reverse debugging.
 			let breakReasonString;
-			if (StepHistory.isInStepBackMode()) {
-				this.debugConsoleAppendLine('Step-out');
+			const stepBackMode=StepHistory.isInStepBackMode();
+			if (stepBackMode) {
 				// StepOut
-				breakReasonString=StepHistory.stepOut();
+				breakReasonString=await StepHistory.stepOut();
 			}
 			else {
 				// Normal Step-Out
-				await this.startStepInfo('Step-out');
-				// Check if lite history need to be stored.
-				this.checkAndStoreLiteHistory();
 				StepHistory.clear();
 				breakReasonString=await Remote.stepOut();
-				// Display T-states and time
-				await this.endStepInfo(undefined);
-
-				// Update memory dump etc.
-				await this.update();
 			}
 
+
+			// Print break reason
 			if (breakReasonString) {
 				// Output a possible problem (end of log reached)
-				this.debugConsoleAppendLine(breakReasonString);
+				this.debugConsoleIndentedText(breakReasonString);
 				// Show break reason
 				this.decorateBreak(breakReasonString);
+			}
+
+			if (!stepBackMode) {
+				// Display info
+				await this.endStepInfo();
 			}
 
 			// Send event
@@ -1649,24 +1670,25 @@ export class DebugSessionClass extends DebugSession {
 	  */
 	protected async stepBackRequest(response: DebugProtocol.StepBackResponse, args: DebugProtocol.StepBackArguments): Promise<void> {
 		this.handleRequest(response, async () => {
+
+			await this.startStepInfo('Step-Back', true);
+
 			// Step back
-			const result=await StepHistory.stepBack();
+			const breakReason=await StepHistory.stepBack();
 
-			// Check if Lite history then print
-			if (!(CpuHistory as any))
-				this.debugConsoleAppend('Lite ');
-
-			// Print
-			let text='Step-back';
-			if (result.instruction)
-				text+=': '+result.instruction;
-			this.debugConsoleAppendLine(text);
-
-			if (result.breakReasonString) {
+			// Print break reason
+			if (breakReason) {
 				// Output a possible problem (end of log reached)
-				this.debugConsoleAppendLine(result.breakReasonString);
+				this.debugConsoleIndentedText(breakReason);
 				// Show break reason
-				this.decorateBreak(result.breakReasonString);
+				this.decorateBreak(breakReason);
+			}
+			else {
+				// Print instruction (it's only printed if no error, as the
+				// only error that can occur is 'start of history reached'.
+				const instr=await this.getCurrentInstruction();
+				if (instr)
+					this.debugConsoleIndentedText(instr);
 			}
 
 			// Send event
@@ -1685,51 +1707,82 @@ export class DebugSessionClass extends DebugSession {
 		const expression=command.trim().replace(/\s+/g, ' ');
 		const tokens=expression.split(' ');
 		const cmd=tokens.shift();
+		if (!cmd)
+			throw Error("No command.");
+
+		// Check for "-view"
+		let viewTitle;
+		if (tokens[0]=='-view') {
+			tokens.shift();
+			viewTitle=cmd.substr(1)+' '+tokens.join(' ');	// strip '-'
+		}
+
 		// All commands start with "-"
+		let output;
 		if (cmd=='-help'||cmd=='-h') {
-			return await this.evalHelp(tokens);
+			output = await this.evalHelp(tokens);
 		}
 		else if (cmd=='-LOGPOINT'||cmd=='-logpoint') {
-			return await this.evalLOGPOINT(tokens);
+			output = await this.evalLOGPOINT(tokens);
 		}
-		else if (cmd=='-ASSERT'||cmd=='-assert') {
-			return await this.evalASSERT(tokens);
+		else if (cmd=='-ASSERTION'||cmd=='-assertion') {
+			output = await this.evalASSERTION(tokens);
 		}
 		else if (cmd=='-eval') {
-			return await this.evalEval(tokens);
+			output = await this.evalEval(tokens);
 		}
 		else if (cmd=='-exec'||cmd=='-e') {
-			return await this.evalExec(tokens);
+			output = await this.evalExec(tokens);
 		}
 		else if (cmd=='-label'||cmd=='-l') {
-			return await this.evalLabel(tokens);
+			output = await this.evalLabel(tokens);
 		}
 		else if (cmd=='-md') {
-			return await this.evalMemDump(tokens);
+			output = await this.evalMemDump(tokens);
+		}
+		else if (cmd=='-ms') {
+			output = await this.evalMemSave(tokens);
+		}
+		else if (cmd=='-mv') {
+			output = await this.evalMemView(tokens);
 		}
 		else if (cmd=='-dasm') {
-			return await this.evalDasm(tokens);
+			output = await this.evalDasm(tokens);
 		}
 		else if (cmd=='-patterns') {
-			return await this.evalSpritePatterns(tokens);
+			output = await this.evalSpritePatterns(tokens);
 		}
 		else if (cmd=='-WPMEM'||cmd=='-wpmem') {
-			return await this.evalWPMEM(tokens);
+			output = await this.evalWPMEM(tokens);
 		}
 		else if (cmd=='-sprites') {
-			return await this.evalSprites(tokens);
+			output = await this.evalSprites(tokens);
 		}
 		else if (cmd=='-state') {
-			return await this.evalStateSaveRestore(tokens);
+			output = await this.evalStateSaveRestore(tokens);
 		}
 		// Debug commands
 		else if (cmd=='-dbg') {
-			return await this.evalDebug(tokens);
+			output = await this.evalDebug(tokens);
 		}
 		//
 		else {
 			// Unknown command
-			throw new Error("Unknown command: '"+expression+"'");
+			throw Error("Unknown command: '"+expression+"'");
+		}
+
+		// Check for output target
+		if (viewTitle) {
+			// Output text to new view.
+			// Create new view
+			const panel=new TextView(viewTitle, output);
+			await panel.update();
+			// Send empty response
+			return '';
+		}
+		else {
+			// Output text to console
+			return output;
 		}
 	}
 
@@ -1737,6 +1790,9 @@ export class DebugSessionClass extends DebugSession {
 	/**
 	 * Is called when hovering or when an expression is added to the watches.
 	 * Or if commands are input in the debug console.
+	 * both have different formats:
+	 * - hovering: "word", e.g. "data_b60" or ".loop" or "HL"
+	 * - debug console: starts with "-", e.g. "-wpmem enable"
 	 */
 	protected async evaluateRequest(response: DebugProtocol.EvaluateResponse, args: DebugProtocol.EvaluateArguments): Promise<void> {
 		// Check if its a debugger command
@@ -1748,6 +1804,7 @@ export class DebugSessionClass extends DebugSession {
 			return;
 		}
 
+		// Check for debug console
 		if (expression.startsWith('-')) {
 			try {
 				if (expression.startsWith('-')) {
@@ -1764,13 +1821,13 @@ export class DebugSessionClass extends DebugSession {
 			return;
 		}
 
+		// Hover
 		Log.log('evaluate.expression: '+args.expression);
 		Log.log('evaluate.context: '+args.context);
 		Log.log('evaluate.format: '+args.format);
 
-		// get the name
-		const name=expression;
 		// Check if it is a register
+		const name = expression;
 		if (Z80RegistersClass.isRegister(name)) {
 			const formatMap=(args.context=='hover')? Z80RegisterHoverFormat:Z80RegisterVarFormat;
 			const formattedValue=await Utility.getFormattedRegister(name, formatMap); response.body={
@@ -1781,13 +1838,14 @@ export class DebugSessionClass extends DebugSession {
 			return;
 		}
 
+
 		// Check if it is a label. A label may have a special formatting:
 		// Example: LBL_TEXT 10, b
-		// = Addresse LBL_TEXT, 10 bytes
+		// = Address LBL_TEXT, 10 bytes
 		const match=/^@?([^\s,]+)\s*(,\s*([^\s,]*))?(,\s*([^\s,]*))?/.exec(name);
 		if (match) {
 			let labelString=match[1];
-			let sizeString=match[3];
+			let elemCountString=match[3];
 			let byteWord=match[5];
 			// Defaults
 			if (labelString) {
@@ -1795,65 +1853,83 @@ export class DebugSessionClass extends DebugSession {
 				let lastLabel;
 				let modulePrefix;
 				// First check for module name and local label prefix (sjasmplus).
-				Remote.getRegisters().then(() => {
-					const pc=Remote.getPC();
-					const entry=Labels.getFileAndLineForAddress(pc);
-					// Local label and prefix
-					lastLabel=entry.lastLabel;
-					modulePrefix=entry.modulePrefix;
+				//Remote.getRegisters().then(() => {
+				const pcLongAddr = Remote.getPCLong();
+				const entry = Labels.getFileAndLineForAddress(pcLongAddr);
+				// Local label and prefix
+				lastLabel = entry.lastLabel;
+				modulePrefix = entry.modulePrefix;
 
-					// Convert label
-					try {
-						labelValue=Utility.evalExpression(labelString, false, modulePrefix, lastLabel);
-					} catch {}
+				// Convert label
+				try {
+					labelValue = Utility.evalExpression(labelString, false, modulePrefix, lastLabel);
+				} catch {}
 
-					if (isNaN(labelValue)) {
-						// Return empty response
-						this.sendResponse(response);
-						return;
+				if (isNaN(labelValue)) {
+					// Return empty response
+					this.sendResponse(response);
+					return;
+				}
+
+				// Is a number
+				let elemCount = 100;
+				if (elemCountString) {
+					const readSize = Labels.getNumberFromString64k(elemCountString) || NaN;
+					if (!isNaN(readSize))
+						elemCount = readSize;
+				}
+				if (!byteWord || byteWord.length == 0)
+					byteWord = "bw";	// both byte and word
+				// Create fullLabel
+				const fullLabel = Utility.createFullLabel(labelString, "", lastLabel);	// Note: the module is from the PC location, this could be irritating. Therefore it is left off.
+				// Now create a "variable" for the bigValues or small values
+				const format = (labelValue <= Settings.launch.smallValuesMaximum) ? Settings.launch.formatting.smallValues : Settings.launch.formatting.bigValues;
+				Utility.numberFormatted(name, labelValue, 2, format, undefined).then(formattedValue => {
+					if (labelValue <= Settings.launch.smallValuesMaximum) {
+						// small value
+						// Response
+						response.body = {
+							result: (args.context == 'hover') ? fullLabel + ': ' + formattedValue : formattedValue,
+							variablesReference: 0,
+							//type: "data",
+							//namedVariables: 0
+						}
 					}
+					else {
+						// big value
+						// Create a label variable
+						const labelVar = new LabelVar(labelValue, elemCount, byteWord, this.listVariables);
 
-					// Is a number
-					var size=100;
-					if (sizeString) {
-						const readSize=Labels.getNumberFromString(sizeString)||NaN;
-						if (!isNaN(readSize))
-							size=readSize;
-					}
-					if (!byteWord||byteWord.length==0)
-						byteWord="bw";	// both byte and word
-					// Now create a "variable" for the bigValues or small values
-					const format=(labelValue<=Settings.launch.smallValuesMaximum)? Settings.launch.formatting.smallValues:Settings.launch.formatting.bigValues;
-					Utility.numberFormatted(name, labelValue, 2, format, undefined).then(formattedValue => {
-						if (labelValue<=Settings.launch.smallValuesMaximum) {
-							// small value
-							// Response
-							response.body={
-								result: (args.context=='hover')? name+': '+formattedValue:formattedValue,
-								variablesReference: 0,
-								//type: "data",
-								//amedVariables: 0
-							}
+
+						/* TODO: Implement:
+						let labelVar;
+						// Get sub properties
+						const props = Labels.getSubLabels(byteWord);
+						if (props.length == 0) {
+							// Simple label
+							labelVar = new LabelVar(labelValue, elemCount, byteWord, this.listVariables);
 						}
 						else {
-							// big value
-							// Create a label variable
-							const labelVar=new LabelVar(labelValue, size, byteWord, this.listVariables);
-							// Add to list
-							const ref=this.listVariables.addObject(labelVar);
-							// Response
-							response.body={
-								result: (args.context=='hover')? name+': '+formattedValue:formattedValue,
-								variablesReference: ref,
-								type: "data",
-								//presentationHint: ,
-								namedVariables: 2,
-								//indexedVariables: 100
-							};
+							const size = Labels.getNumberFromString64k(byteWord);
+							labelVar = new StructVar(labelValue, elemCount, size, byteWord, props, this.listVariables);
 						}
-						this.sendResponse(response);
-					});
-				});	// Emulator.getRegisters
+						*/
+
+						// Add to list
+						const ref = this.listVariables.addObject(labelVar);
+						// Response
+						response.body = {
+							result: (args.context == 'hover') ? fullLabel + ': ' + formattedValue : formattedValue,
+							variablesReference: ref,
+							type: "data",
+							//presentationHint: ,
+							namedVariables: 2,
+							//indexedVariables: 100
+						}
+					}
+					this.sendResponse(response);
+				});
+				//});	// Emulator.getRegisters
 				return;
 			}	// If labelString
 		}	// If match
@@ -1871,20 +1947,22 @@ export class DebugSessionClass extends DebugSession {
 	protected async evalHelp(tokens: Array<string>): Promise<string> {
 		const output=
 			`Allowed commands are:
-"-ASSERT enable|disable|status":
-	- enable|disable: Enables/disables all breakpoints caused by ASSERTs set in the sources. All ASSERTs are by default enabled after startup of the debugger.
-	- status: Shows enable status of ASSERT breakpoints.
+"-ASSERTION enable|disable|status":
+	- enable|disable: Enables/disables all breakpoints caused by ASSERTIONs set in the sources. All ASSERTIONs are by default enabled after startup of the debugger.
+	- status: Shows enable status of ASSERTION breakpoints.
 "-dasm address count": Disassembles a memory area. count=number of lines.
 "-eval expr": Evaluates an expression. The expression might contain
 mathematical expressions and also labels. It will also return the label if
 the value correspondends to a label.
-"-exec|e [-view] cmd args": cmd and args are directly passed to ZEsarUX. E.g. "-exec get-registers". If you add "-view" the output will go into a new view instead of the console.
+"-exec|e cmd args": cmd and args are directly passed to ZEsarUX. E.g. "-exec get-registers".
 "-help|h": This command. Do "-e help" to get all possible ZEsarUX commands.
 "-label|-l XXX": Returns the matching labels (XXX) with their values. Allows wildcard "*".
 "-LOGPOINT enable|disable|status [group]":
 	- enable|disable: Enables/disables all logpoints caused by LOGPOINTs of a certain group set in the sources. If no group is given all logpoints are affected. All logpoints are by default disabled after startup of the debugger.
 	- status: Shows enable status of LOGPOINTs per group.
-"-md address size [address_n size_n]*": Memory Dump at 'address' with 'size' bytes. Will open a new view to display the memory dump.
+"-md address size [dec|hex] [word] [little|big]": Memory dump at 'address' with 'size' bytes. Output is in 'hex' (default) or 'dec'imal. Per default data will be grouped in bytes. But if chosen, words are output. Last argument is the endianness which is little endian by default.
+"-ms address size filename": Saves a memory dump to a file. The file is saved to the temp directory.
+"-mv address size [address_n size_n]*": Memory view at 'address' with 'size' bytes. Will open a new view to display the memory contents.
 "-patterns [index[+count|-endindex] [...]": Shows the tbblue sprite patterns beginning at 'index' until 'endindex' or a number of 'count' indices. The values can be omitted. 'index' defaults to 0 and 'count' to 1.
 Without any parameter it will show all sprite patterns.
 You can concat several ranges.
@@ -1902,13 +1980,13 @@ Examples:
 "-e write-memory 8000h 9fh": Writes 9fh to memory address 8000h.
 "-e gr": Shows all registers.
 "-eval 2+3*5": Results to "17".
-"-md 0 10": Shows the memory at address 0 to address 9.
+"-mv 0 10": Shows the memory at address 0 to address 9.
 "-sprites": Shows all visible sprites.
 "-state save 1": Stores the current state as 'into' 1.
 "-state restore 1": Restores the state 'from' 1.
 
 Notes:
-"-exec run" will not work at the moment and leads to a disconnect.
+For all commands (if it makes sense or not) you can add "-view" as first parameter. This will redirect the output to a new view instead of the console. E.g. use "-help -view" to put the help text in an own view.
 `;
 		/*
 		For debugging purposes there are a few more:
@@ -1942,7 +2020,7 @@ Notes:
 		// convert also to bin
 		result+=', '+value.toString(2)+'b';
 		// check for label
-		const labels=Labels.getLabelsPlusIndexForNumber(value);
+		const labels=Labels.getLabelsPlusIndexForNumber64k(value);
 		if (labels.length>0) {
 			result+=', '+labels.join(', ');
 		}
@@ -1957,23 +2035,10 @@ Notes:
  	 * @returns A Promise with a text to print.
 	 */
 	protected async evalExec(tokens: Array<string>): Promise<string> {
-		// Check for "-view"
-		let redirectToView=false;
-		if (tokens[0]=='-view') {
-			redirectToView=true;
-			tokens.shift();
-		}
 		// Execute
 		const machineCmd=tokens.join(' ');
 		const textData=await Remote.dbgExec(machineCmd);
-		if (redirectToView) {
-			// Create new view
-			const panel=new TextView("exec: "+machineCmd, textData);
-			await panel.update();
-			// Send response
-			return 'OK';
-		}
-		// Print to console
+		// Return value
 		return textData;
 	}
 
@@ -1997,7 +2062,9 @@ Notes:
 		let result='';
 		if (labels.length>0) {
 			labels.map(label => {
-				const value=Labels.getNumberForLabel(label);
+				let value = Labels.getNumberForLabel(label);
+				if (value != undefined)
+					value &= 0xFFFF;
 				result+=label+': '+Utility.getHexString(value, 4)+'h\n';
 			})
 		}
@@ -2013,10 +2080,140 @@ Notes:
 	/**
 	 * Shows a view with a memory dump.
 	 * @param tokens The arguments. I.e. the address and size.
- 	 * @returns A Promise with a text to print.
+	 * @returns A Promise with a text to print.
 	 */
 	protected async evalMemDump(tokens: Array<string>): Promise<string> {
-		// check count of arguments
+		// Check count of arguments
+		if (tokens.length<2) {
+			// Error Handling: No arguments
+			throw Error("Address and size expected.");
+		}
+
+		// Address
+		const addressString=tokens[0];
+		const address=Utility.evalExpression(addressString);
+		if (address<0||address>0xFFFF)
+			throw Error("Address ("+address+") out of range.");
+
+		// Size
+		const sizeString=tokens[1];
+		const size=Utility.evalExpression(sizeString);
+		if (size<0||size>0xFFFF)
+			throw Error("Size ("+size+") out of range.");
+
+		// Byte or word
+		let unitSize=1; 	// Default=byte
+		let bigEndian=false;
+		// Hex/dec
+		let hex=true;
+		const typeString=tokens[2];
+		if (typeString) {
+			const typeStringLower=typeString.toLowerCase();
+			if (typeStringLower!="hex"&&typeStringLower!="dec"&&typeStringLower!="word")
+				throw Error("'hex', 'dec' or 'word' expected but got '"+typeString+"'.");
+			let k=2;
+			// Check for hex or dec
+			if (typeString=='hex')
+				k++;
+			else if (typeString=='dec') {
+				hex=false;
+				k++;
+			}
+			// Check for unit size (word)
+			const unitSizeString=tokens[k];
+			if (unitSizeString) {
+				const unitSizeStringLower=unitSizeString.toLowerCase()
+				if (unitSizeStringLower!="word")
+					throw Error("'word' expected but got '"+unitSizeString+"'.");
+				unitSize=2;
+				// Endianness
+				const endianness=tokens[k+1];
+				if (endianness) {
+					const endiannessLower=endianness.toLowerCase();
+					if (endiannessLower=="big") {
+						// Big endian
+						bigEndian=true;
+					}
+					else if (endiannessLower!="little") {
+						throw Error("'little' or 'big' expected but got '"+endianness+"'.");
+					}
+				}
+			}
+		}
+
+		// Get memory
+		const data=await Remote.readMemoryDump(address, size);
+
+		// 'Print'
+		let output='';
+		for (let i=0; i<size; i+=unitSize) {
+			let value=data[i];
+			if (unitSize==2) {
+				if (bigEndian)
+					value=(value<<8)+data[i+1];
+				else
+					value+=data[i+1]<<8;
+			}
+			if (hex)
+				output+=Utility.getHexString(value, 2*unitSize)+' ';
+			else
+				output+=value+' ';
+		}
+
+		// Send response
+		return output;
+	}
+
+
+	/**
+	 * Saves a memory dump to a file.
+	 * @param tokens The arguments. I.e. the address and size.
+	 * @returns A Promise with a text to print.
+	 */
+	protected async evalMemSave(tokens: Array<string>): Promise<string> {
+		// Check count of arguments
+		if (tokens.length<2) {
+			// Error Handling: No arguments
+			throw Error("Address and size expected.");
+		}
+
+		// Address
+		const addressString=tokens[0];
+		const address=Utility.evalExpression(addressString);
+		if (address<0||address>0xFFFF)
+			throw Error("Address ("+address+") out of range.");
+
+		// Size
+		const sizeString=tokens[1];
+		const size=Utility.evalExpression(sizeString);
+		if (size<0||size>0xFFFF)
+			throw Error("Size ("+size+") out of range.");
+
+		// Get filename
+		const filename=tokens[2];
+		if (!filename)
+			throw Error("No filename given.");
+
+		// Get memory
+		const data=await Remote.readMemoryDump(address, size);
+
+		// Save to .tmp/filename
+		const relPath=Utility.getRelTmpFilePath(filename);
+		const absPath=Utility.getAbsFilePath(relPath);
+		fs.writeFileSync(absPath, data);
+
+		// Send response
+		return 'OK';
+	}
+
+
+	/**
+	 * Shows a view with a memory dump.
+	 * @param tokens The arguments. I.e. the address and size.
+	 * @returns A Promise with a text to print.
+	 */
+	protected async evalMemView(tokens: Array<string>): Promise<string> {
+		// Check count of arguments
 		if (tokens.length==0) {
 			// Error Handling: No arguments
 			throw new Error("Address and size expected.");
@@ -2030,12 +2227,12 @@ Notes:
 		// Get all addresses/sizes.
 		const addrSizes=new Array<number>();
 		for (let k=0; k<tokens.length; k+=2) {
-			// address
+			// Address
 			const addressString=tokens[k];
 			const address=Utility.evalExpression(addressString);
 			addrSizes.push(address);
 
-			// size
+			// Size
 			const sizeString=tokens[k+1];
 			const size=Utility.evalExpression(sizeString);
 			addrSizes.push(size);
@@ -2043,8 +2240,11 @@ Notes:
 
 		// Create new view
 		const panel=new MemoryDumpView();
-		for (let k=0; k<tokens.length; k+=2)
-			panel.addBlock(addrSizes[k], addrSizes[k+1]);
+		for (let k=0; k<tokens.length; k+=2) {
+			const start=addrSizes[k];
+			const size=addrSizes[k+1]
+			panel.addBlock(start, size, Utility.getHexString(start&0xFFFF, 4)+'h-'+Utility.getHexString((start+size-1)&0xFFFF, 4)+'h');
+		}
 		panel.mergeBlocks();
 		await panel.update();
 
@@ -2054,12 +2254,12 @@ Notes:
 
 
 	/**
-	 * Shows a a small disassembly in teh console.
+	 * Shows a a small disassembly in the console.
 	 * @param tokens The arguments. I.e. the address and size.
  	 * @returns A Promise with a text to print.
 	 */
 	protected async evalDasm(tokens: Array<string>): Promise<string> {
-		// check count of arguments
+		// Check count of arguments
 		if (tokens.length==0) {
 			// Error Handling: No arguments
 			throw new Error("Address and number of lines expected.");
@@ -2136,16 +2336,16 @@ Notes:
 
 
 	/**
-	 * ASSERT. Enable/disable/status.
+	 * ASSERTION. Enable/disable/status.
 	 * @param tokens The arguments.
  	 * @returns A Promise<string> with a probably error text.
 	 */
-	protected async evalASSERT(tokens: Array<string>): Promise<string> {
+	protected async evalASSERTION(tokens: Array<string>): Promise<string> {
 		const param=tokens[0]||'';
 		if (param=='enable'||param=='disable') {
-			// Enable or disable all ASSERT breakpoints
+			// Enable or disable all ASSERTION breakpoints
 			const enable=(param=='enable');
-			await Remote.enableAssertBreakpoints(enable);
+			await Remote.enableAssertionBreakpoints(enable);
 		}
 		else if (param=='status') {
 			// Just show
@@ -2155,21 +2355,25 @@ Notes:
 			throw new Error("Unknown argument: '"+param+"'");
 		}
 
-		// Show enable status of all ASSERT breakpoints
-		const enable=Remote.assertBreakpointsEnabled;
+		// Show enable status of all ASSERTION breakpoints
+		const enable=Remote.assertionBreakpointsEnabled;
 		const enableString=(enable)? 'enabled':'disabled';
-		let result='ASSERT breakpoints are '+enableString+'.\n';;
+		let result='ASSERTION breakpoints are '+enableString+'.\n';;
 		if (enable) {
-			// Also list all assert breakpoints
-			const abps=Remote.getAllAssertBreakpoints();
+			// Also list all assertion breakpoints
+			const abps=Remote.getAllAssertionBreakpoints();
 			for (const abp of abps) {
-				const labels=Labels.getLabelsForNumber(abp.address);
-				labels.push(abp.address.toString());	// as decimal number
-				const labelsString=labels.join(', ');
-				result+=Utility.getHexString(abp.address, 4)+'h ('+labelsString+'): ';
+				result += Utility.getLongAddressString(abp.address);
+				const labels = Labels.getLabelsForLongAddress(abp.address);
+				if (labels.length>0) {
+					const labelsString=labels.join(', ');
+					result+=' ('+labelsString+')';
+				}
 				// Condition, remove the brackets
-				result+=Utility.getAssertFromCondition(abp.condition)+'\n';
+				result+=', Condition: '+Utility.getAssertionFromCondition(abp.condition)+'\n';
 			}
+			if (abps.length==0)
+				result+='No ASSERTION breakpoints.\n';
 		}
 		return result;
 	}
@@ -2192,7 +2396,7 @@ Notes:
 		}
 		else {
 			// Unknown argument
-			throw new Error("Unknown argument: '"+param+"'");
+			throw Error("Unknown argument: '"+param+"'");
 		}
 
 		// Show enable status of all WPMEM watchpoints
@@ -2203,11 +2407,17 @@ Notes:
 			// Also list all watchpoints
 			const wps=Remote.getAllWpmemWatchpoints();
 			for (const wp of wps) {
-				const labels=Labels.getLabelsForNumber(wp.address);
-				labels.push(wp.address.toString());	// as decimal number
-				const labelsString=labels.join(', ');
-				result+=Utility.getHexString(wp.address, 4)+'h ('+labelsString+'): '+wp.access+', size='+Utility.getHexString(wp.size, 4)+'h ('+wp.size+')\n';
+				result += Utility.getLongAddressString(wp.address);
+				const labels=Labels.getLabelsForLongAddress(wp.address);
+				if (labels.length>0) {
+					const labelsString=labels.join(', ');
+					result+=' ('+labelsString+')';
+				}
+				// Condition, remove the brackets
+				result+=', size='+wp.size+'\n';
 			}
+			if (wps.length==0)
+				result+='No WPMEM watchpoints.\n';
 		}
 		return result;
 	}
@@ -2466,18 +2676,28 @@ Notes:
 		// Get variable object
 		const varObj=this.listVariables.getObject(ref);
 		response.success=false;	// will be changed if successful.
+
 		// Safety check
 		if (varObj) {
-			// Set value
-			const formattedString=await varObj.setValue(name, value);
-			// Send response
-			if (formattedString) {
-				response.body={value: formattedString};
-				response.success=true;
+			// Variables can be changed only if not in reverse debug mode
+			const msg=varObj.changeable();
+			if (msg) {
+				// Change not allowed e.g. if in reverse debugging
+				response.message=msg;
+			}
+			else {
+				// Set value
+				const formattedString=await varObj.setValue(name, value);
+				// Send response
+				if (formattedString) {
+					response.body={value: formattedString};
+					response.success=true;
+				}
 			}
 		}
 		this.sendResponse(response);
 	}
+
 
 	/**
 	 * Change the Program Counter such that it points to the given file/line.
@@ -2486,12 +2706,24 @@ Notes:
 	 */
 	protected async setPcToLine(filename: string, lineNr: number): Promise<void> {
 		// Get address of file/line
-		const realLineNr=lineNr; //this.convertClientLineToDebugger(lineNr);
+		const realLineNr=lineNr;
 		let addr=Remote.getAddrForFileAndLine(filename, realLineNr);
 		if (addr<0)
 			return;
+		// Check if bank is the same
+		const slots=Remote.getSlots();
+		if (slots) {
+			const bank = Z80Registers.getBankFromAddress(addr);
+			if (bank >= 0) {
+				const slotIndex = Z80Registers.getSlotFromAddress(addr);
+				if (bank != slots[slotIndex]) {
+					this.showError("Cannot set PC to a location (address="+Utility.getHexString(addr&0xFFFF,4)+"h) of a bank (bank " + bank + ") hat is currently not paged in.");
+					return;
+				}
+			}
+		}
 		// Now change Program Counter
-		await Remote.setProgramCounterWithEmit(addr);
+		await Remote.setProgramCounterWithEmit(addr&0xFFFF);
 	}
 
 
@@ -2602,14 +2834,22 @@ Notes:
 	 * @param timeout Timeout in ms. For this time traffic has to be quiet.
 	 * @param handler This handler is called after being quiet for the given timeout.
 	 */
-	public async executeAfterBeingQuietFor(timeout: number): Promise<void> {
-		await Remote.executeAfterBeingQuietFor(timeout);
+	public async waitForBeingQuietFor(timeout: number): Promise<void> {
+		await Remote.waitForBeingQuietFor(timeout);
 	}
 
 
 
 	protected async terminateRequest(response: DebugProtocol.TerminateResponse, args: DebugProtocol.TerminateArguments): Promise<void> {
+	}
 
+
+	/**
+	 * Output indented text to the console.
+	 * @param text The output string.
+	 */
+	protected debugConsoleIndentedText(text: string) {
+		this.debugConsoleAppendLine(this.debugConsoleIndentation+text);
 	}
 }
 

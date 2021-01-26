@@ -7,17 +7,19 @@ import { RefList } from '../misc/refList';
 import { Remote } from '../remotes/remotefactory';
 import { Format } from '../disassembler/format';
 import {DisassemblyClass} from '../misc/disassembly';
+import {StepHistory} from '../remotes/cpuhistory';
 
 
 /**
  * Represents a variable.
- * Variables know how to retrieve the data from Zesarux.
+ * Variables know how to retrieve the data from the remote.
  */
 export class ShallowVar {
-	/// Override this. It should retrieve the contents of the variable. E.g. bei communicating with zesarux.
+	/// Override this. It should retrieve the contents of the variable. E.g. by communicating with the remote.
 	public async getContent(): Promise<Array<DebugProtocol.Variable>> {
 		return [];
 	}
+
 
 	/**
 	 * Override if the variable or its properties can be set.
@@ -31,13 +33,44 @@ export class ShallowVar {
 		return undefined as any;
 	};
 
+
+	/**
+	 * Checks if allowed to change the value.
+	 * If not returns a string with an error message.
+	 * Override if necessary.
+	 * @param name The name of data.
+	 * @returns 'Altering values not allowed in time-travel mode.' or undefined.
+	 */
+	public changeable(name: string): string|undefined {
+		// Change normally not allowed if in reverse debugging
+		if (StepHistory.isInStepBackMode())
+			return 'Altering values not allowed in time-travel mode.';
+		// Otherwise allow
+		return undefined;
+	}
+
 }
 
 
 /**
- * The DisassemblyVar class knows how to retrieve the disassembly from zesarux.
+ * Represents a ShallowVar that is const, i.e. not changeable by the user.
  */
-export class DisassemblyVar extends ShallowVar {
+export class ShallowVarConst extends ShallowVar {
+	/**
+	 * Not changeable by user.
+	 * @param name The name of data.
+	 * @returns 'You cannot alter this value.'
+	 */
+	public changeable(name: string): string|undefined {
+		return 'You cannot alter this value.';
+	}
+}
+
+
+/**
+ * The DisassemblyVar class knows how to retrieve the disassembly from the remote.
+ */
+export class DisassemblyVar extends ShallowVarConst {
 
 	/// The address the disassembly should start
 	private addr: number;
@@ -55,13 +88,13 @@ export class DisassemblyVar extends ShallowVar {
 	 */
 	public constructor(addr: number, count: number) {
 		super();
-		this.addr = addr;
+		this.addr = addr&0xFFFF;
 		this.count = count;
 	}
 
 
 	/**
-	 * Communicates with zesarux to retrieve the disassembly.
+	 * Communicates with the Remote to retrieve the disassembly.
 	 * @returns A Promise with the disassembly.
 	 * A list with all disassembled lines is passed (as variables).
 	 */
@@ -79,8 +112,8 @@ export class DisassemblyVar extends ShallowVar {
 			const address=entry.address;
 			// Add to list
 			const addrString=Format.getHexString(address).toUpperCase();
-			const labels=Labels.getLabelsForNumber(address);
-			var addrLabel=addrString;
+			const labels=Labels.getLabelsForNumber64k(address);
+			let addrLabel=addrString;
 			if (labels)
 				addrLabel=labels.join(',\n');
 			list.push({
@@ -99,9 +132,9 @@ export class DisassemblyVar extends ShallowVar {
 
 /**
  * The MemorySlotsVar class knows how to retrieve the mapping of
- * memory slots and banks from zesarux.
+ * memory slots and banks from Remote.
  */
-export class MemorySlotsVar extends ShallowVar {
+export class MemorySlotsVar extends ShallowVarConst {
 	/**
 	 * Constructor.
 	 */
@@ -111,7 +144,7 @@ export class MemorySlotsVar extends ShallowVar {
 
 
 	/**
-	 * Communicates with zesarux to retrieve the memory pages.
+	 * Communicates with the Remote to retrieve the memory pages.
 	 * @returns A Promise with the memory page data is available.
 	 * A list with start/end address and name (bank name) is passed.
 	 */
@@ -139,17 +172,17 @@ export class MemorySlotsVar extends ShallowVar {
 
 
 /**
- * The RegistersMainVar class knows how to retrieve the register values from zeasrux.
+ * The RegistersMainVar class knows how to retrieve the register values from Remote.
  */
 export class RegistersMainVar extends ShallowVar {
 
 	/**
-	 * Communicates with zesarux to retrieve the register values.
+	 * Communicates with the remote to retrieve the register values.
 	 * @returns A Promise with the register values.
 	 * A list with all register values is passed (as variables).
 	 */
 	public async getContent(): Promise<Array<DebugProtocol.Variable>> {
-		await Remote.getRegisters();
+		//await Remote.getRegisters();
 		const registers=new Array<DebugProtocol.Variable>();
 		const regNames=this.registerNames();
 		for (let regName of regNames) {
@@ -184,9 +217,23 @@ export class RegistersMainVar extends ShallowVar {
 			else
 				await Remote.setRegisterValueWithEmit(name, value);
 		}
-		await Remote.getRegisters()
+		//await Remote.getRegisters()
 		const formatted = Remote.getVarFormattedReg(name);
 		return formatted;
+	}
+
+	/**
+	 * Checks if allowed to change the value.
+	 * If not returns a string with an error message.
+	 * @param name The name of data.
+	 * @returns 'Altering values not allowed in time-travel mode.' or undefined.
+	 */
+	public changeable(name: string): string|undefined {
+		// Change normally not allowed if in reverse debugging
+		if (StepHistory.isInStepBackMode())
+			return 'Altering values not allowed in time-travel mode.';
+		// Otherwise allow
+		return undefined;
 	}
 
 
@@ -210,7 +257,7 @@ export class RegistersSecondaryVar extends RegistersMainVar {
 	 * Returns the register names to show. The 2nd half of the registers.
 	 */
 	protected registerNames(): Array<string> {
-		return ["A'", "F'", "HL'", "DE'", "BC'", "I", "R", "IM"];
+		return ["A'", "F'", "HL'", "DE'", "BC'", "IXH", "IXL", "IYH", "IYL", "I", "R", "IM"];
 	}
 }
 
@@ -256,8 +303,8 @@ export class StackVar extends ShallowVar {
 			const tabSizes=Utility.calculateTabSizes(format, 2);
 
 			// Loop list as recursive function
-			var index=0;
-			var value=this.stack[0];
+			let index=0;
+			let value=this.stack[0];
 			const undefText="unknown";
 			const recursiveFunction=(formatted) => {
 				stackList.push({
@@ -324,7 +371,7 @@ export class StackVar extends ShallowVar {
  */
 export class LabelVar extends ShallowVar {
 
-	private memArray: Array<DebugProtocol.Variable>;	/// Holds teh 2 pseudo variables for 'byte' and 'word'
+	private memArray: Array<DebugProtocol.Variable>;	/// Holds the 2 pseudo variables for 'byte' and 'word'
 
 	/**
 	 * Constructor.
@@ -335,30 +382,32 @@ export class LabelVar extends ShallowVar {
 	 */
 	public constructor(addr: number, count: number, types: string, list: RefList<ShallowVar>) {
 		super();
-		// Create up to 2 pseudo variables
-		this.memArray = [];
+		// TODO : Implement delayed execution
 
+		// Create array for variables
+		this.memArray = [];
+		types = types.trim();
 		// Byte array
-		if(types.indexOf('b') >= 0)
+		if (types.indexOf('b') >= 0)
 			this.memArray.push(
-			{
-				name: "byte",
-				type: "data",
-				value: "[0.."+(count-1)+"]",
-				variablesReference: list.addObject(new MemDumpByteVar(addr)),
-				indexedVariables: count
-			});
+				{
+					name: "byte",
+					type: "data",
+					value: "[0.." + (count - 1) + "]",
+					variablesReference: list.addObject(new MemDumpByteVar(addr)),
+					indexedVariables: count
+				});
 
 		// Word array
-		if(types.indexOf('w') >= 0)
+		if (types.indexOf('w') >= 0)
 			this.memArray.push(
-			{
-				name: "word",
-				type: "data",
-				value: "[0.."+(count-1)+"]",
-				variablesReference: list.addObject(new MemDumpWordVar(addr)),
-				indexedVariables: count
-			});
+				{
+					name: "word",
+					type: "data",
+					value: "[0.." + (count - 1) + "]",
+					variablesReference: list.addObject(new MemDumpWordVar(addr)),
+					indexedVariables: count
+				});
 	}
 
 
@@ -373,7 +422,254 @@ export class LabelVar extends ShallowVar {
 
 
 /**
- * The MemDumpByteVar class knows how to retrieve a memory dump from zesarux.
+ * The StructVar class is a container class which holds other properties (the elements of the
+ * struct). I.e. SubStructVars.
+ * The StructVar is the parent object which also holds the memory contents.
+ * The SubStructVars refer to it.
+ */
+export class SubStructVar extends ShallowVar {
+	// The parent of the sub structure (which holds the memory contents.
+	protected parentStruct: StructVar;
+
+	// Holds an array with structure properties.
+	protected propArray: Array<DebugProtocol.Variable>;
+
+	// The data is copied from the constructor for lazy initialization.
+	protected relIndex: number;
+	protected count: number;
+	protected size: number;
+	protected struct: string;
+	protected props: Array<string>;
+	protected list: RefList<ShallowVar>;
+
+
+	/**
+	 * Constructor.
+	 * @param relIndex The relative address inside the parent's memory dump.
+	 * @param count The count of elements to display. The count of elements in the struct
+	 * (each can have a different size).
+	 * @param size The size of this object. All elements together.
+	 * @param struct 'b'=byte, 'w'=word or 'bw' for byte and word.
+	 * @param props An array of names of the direct properties of the struct.
+	 * @param parentStruct The parent object which holds the memory.
+	 * @param list The list of variables. The constructor adds the 2 pseudo variables to it.
+	 */
+	public constructor(relIndex: number, count: number, size: number, struct: string, props: Array<string>, parentStruct: StructVar, list: RefList<ShallowVar>) {
+		super();
+		// Save all arguments
+		this.relIndex = relIndex;
+		this.count = count;
+		this.size = size;
+		this.struct = struct.trim();;
+		this.props = props;
+		this.parentStruct = parentStruct;
+		this.list = list;
+	}
+
+
+	/**
+	 * Creates the propArray.
+	 */
+	protected createPropArray() {
+		// Create array for struct
+		this.propArray = [];
+
+		// Byte or word array
+		if (this.struct.startsWith("'")) {
+			// Byte array
+			if (this.struct.indexOf('b') >= 0)
+				this.propArray.push(
+					{
+						name: "byte",
+						type: "data",
+						value: "[0.." + (this.count - 1) + "]",
+						variablesReference: this.list.addObject(new MemDumpByteVar(this.relIndex)),
+						indexedVariables: this.count
+					});
+
+			// Word array
+			if (this.struct.indexOf('w') >= 0)
+				this.propArray.push(
+					{
+						name: "word",
+						type: "data",
+						value: "[0.." + (this.count - 1) + "]",
+						variablesReference: this.list.addObject(new MemDumpWordVar(this.relIndex)),
+						indexedVariables: this.count
+					});
+		}
+		else {
+			// Check for struct
+			// Now create a new variable for each
+			const unsortedMap = new Map<number, string>();
+			for (const prop of this.props) {
+				// Get the relative address
+				const relAddr = Labels.getNumberFromString64k(this.struct + '.' + prop);
+				unsortedMap.set(relAddr, prop);
+			}
+			// Sort map by indices
+			const sortedMap = new Map([...unsortedMap.entries()].sort());
+			// Add an end marker
+			sortedMap.set(-1, '');
+			// Get all lengths of the leafs and dive into nodes
+			let prevName;
+			let prevIndex;
+			for (const [index, name] of sortedMap) {
+				if (prevName) {
+					let len;
+					if (name) {
+						// Create diff of the relative addresses
+						len = index - prevIndex;
+					}
+					else {
+						// Treat last element different
+						// Create diff to the size
+						len = this.size - prevIndex;
+					}
+					// Check for leaf or node
+					const fullName = this.struct + '.' + prevName;
+					const subProps = Labels.getSubLabels(fullName);
+					if (subProps.length > 0) {
+						// Node
+						const nodeRef = this.list.addObject(new SubStructVar(this.relIndex, 1, len, fullName, subProps, this.parentStruct, this.list));
+						this.propArray.push({
+							name: prevName,
+							type: '',
+							value: '',
+							variablesReference: nodeRef
+						});
+					}
+					else {
+						// Leaf
+						// Get value depending on len: 1 byte, 1 word or array.
+						if (len <= 2) {
+							// Byte or word
+							const mem = this.parentStruct.getMemory();
+							let value = mem[this.relIndex+prevIndex];
+							if (len > 1)
+								value += 256 * mem[this.relIndex + prevIndex + 1];
+							const valueString = Utility.getHexString(value, 2*len) + 'h';
+							this.propArray.push({
+								name: prevName,
+								type: valueString,
+								value: valueString,
+								variablesReference: 0
+							});
+						}
+						else {
+							// Array
+						}
+					}
+				}
+				// Next
+				prevName = name;
+				prevIndex = index;
+			}
+		}
+	}
+
+
+	/**
+	 * Returns the properties.
+	 * @returns A Promise with the properties.
+	 */
+	public async getContent(): Promise<Array<DebugProtocol.Variable>> {
+		if (!this.propArray)
+			this.createPropArray();
+		return this.propArray;
+	}
+}
+
+
+
+/**
+ * The StructVar class is a container class which holds other properties (the elements of the
+ * struct). I.e. SubStructVars.
+ * The StructVar is the parent object which also holds the memory contents.
+ * The SubStructVars refer to it.
+ */
+export class StructVar extends SubStructVar {
+
+	// The memory contents (lazy initialized).
+	protected memory: Uint8Array;
+
+	/**
+	 * Constructor.
+	 * @param addr The address of the memory dump
+	 * @param count The count of elements to display. The count of elements in the struct
+	 * (each can have a different size).
+	 * @param size The size of this object. All elements together.
+	 * @param struct 'b'=byte, 'w'=word or 'bw' for byte and word.
+	 * @param props An array of names of the direct properties of the struct.
+	 * @param list The list of variables. The constructor adds the 2 pseudo variables to it.
+	 */
+	public constructor(addr: number, count: number, size: number, struct: string, props: Array<string>, list: RefList<ShallowVar>) {
+		super(addr, count, size, struct, props, undefined as any, list);
+		this.parentStruct = this;
+	}
+
+
+	/**
+	 * Creates the propArray.
+	 * On top level this is really an array.
+	 */
+	protected createPropArray() {
+		// But only if more than 1 element
+		if (this.count <= 1) {
+			super.createPropArray();
+		}
+		else {
+			// Create array
+			this.propArray = [];
+			// Create a number of nodes
+			let relIndex = 0;
+			for (let i = 0; i < this.count; i++) {
+				const nodeRef = this.list.addObject(new SubStructVar(relIndex, 1, this.size, this.struct, this.props, this.parentStruct, this.list));
+				this.propArray.push({
+					name: '['+i+']',
+					type: '',
+					value: '',
+					variablesReference: nodeRef
+				});
+				// Next
+				relIndex += this.size;
+			}
+		}
+	}
+
+
+	/**
+	 * Returns the properties.
+	 * Retrieves the memory.
+	 * @returns A Promise with the properties.
+	 */
+	public async getContent(): Promise<Array<DebugProtocol.Variable>> {
+		// Check if memory has been retrieved
+		if (!this.memory) {
+			// Retrieve memory values
+			const countBytes = this.count * this.size;
+			this.memory = await Remote.readMemoryDump(this.relIndex, countBytes);
+		}
+		// Check if properties array exists.
+		if (!this.propArray)
+			this.createPropArray();
+		return this.propArray;
+	}
+
+
+	/**
+	 * Returns the cached memory. If not existing yet it is fetched.
+	 */
+	public getMemory() {
+		return this.memory;
+	}
+}
+
+
+
+
+/**
+ * The MemDumpByteVar class knows how to retrieve a memory dump from remote.
  * It allows retrieval of byte arrays.
  */
 export class MemDumpByteVar extends ShallowVar {
@@ -391,7 +687,7 @@ export class MemDumpByteVar extends ShallowVar {
 
 
 	/**
-	 * Communicates with zesarux to retrieve the memory dump.
+	 * Communicates with the remote to retrieve the memory dump.
 	 * @param handler This handler is called when the memory dump is available.
 	 * @param start The start index of the array. E.g. only the range [100..199] should be displayed.
 	 * @param count The number of bytes to display.
@@ -400,20 +696,20 @@ export class MemDumpByteVar extends ShallowVar {
 	public async getContent(start?: number, count?: number): Promise<Array<DebugProtocol.Variable>> {
 		Utility.assert(start!=undefined);
 		Utility.assert(count!=undefined);
-		var addr=this.addr+(start as number);
+		let addr=this.addr+(start as number);
 		const size = this.size();
 		const memArray = new Array<DebugProtocol.Variable>();
 		const format = this.formatString();
 		// Calculate tabsizing array
 		const tabSizes = Utility.calculateTabSizes(format, size);
 		// Format all array elements
-		for (var i=0; i<(count as number)/size; i++) {
+		for (let i=0; i<(count as number)/size; i++) {
 			// format
 			const addr_i=addr+i*size;
 			const formatted=await Utility.numberFormatted('', addr_i, size, format, tabSizes);
 			// check for label
-			var types=[Utility.getHexString(addr_i, 4)];
-			const labels=Labels.getLabelsPlusIndexForNumber(addr_i);
+			let types=[Utility.getHexString(addr_i, 4)];
+			const labels=Labels.getLabelsPlusIndexForNumber64k(addr_i);
 			if (labels)
 				types=types.concat(labels);
 			const descr=types.join(',\n');
@@ -448,7 +744,7 @@ export class MemDumpByteVar extends ShallowVar {
 
 
 /**
- * The MemDumpWordVar class knows how to retrieve a memory dump from zesarux.
+ * The MemDumpWordVar class knows how to retrieve a memory dump from the remote.
  * It allows retrieval of word arrays.
  */
 export class MemDumpWordVar extends MemDumpByteVar {

@@ -1,9 +1,9 @@
 {
 	"name": "dezog",
 	"displayName": "DeZog",
-	"version": "1.4.8",
+	"version": "2.0.3",
 	"publisher": "maziac",
-	"description": "Visual Studio Code Debug Adapter for the Z80/ZX Spectrum.",
+	"description": "Visual Studio Code Debugger for the Z80/ZX Spectrum.",
 	"author": {
 		"name": "Thomas Busse"
 	},
@@ -22,7 +22,7 @@
 		"sjasmplus"
 	],
 	"engines": {
-		"vscode": "^1.35.1",
+		"vscode": "^1.50.0",
 		"node": "^7.9.0"
 	},
 	"icon": "images/dezog-icon.png",
@@ -39,8 +39,6 @@
 		"tslint": "eslint ./src/**/*.ts",
 		"watch": "tsc -w -p ./src",
 		"test": "mocha -u tdd ./out/tests/",
-		"preinstall": "npx npm-force-resolutions",
-		"postinstall": "node ./node_modules/vscode/bin/install",
 		"package": "vsce package",
 		"publish": "vsce publish"
 	},
@@ -53,7 +51,10 @@
 		"jsonc-parser": "^2.2.1",
 		"mocha": "^7.1.1",
 		"node-gzip": "^1.1.2",
+		"posthtml": "^0.15.1",
+		"posthtml-toc": "^1.0.3",
 		"rng": "^0.2.2",
+		"showdown": "^1.9.1",
 		"ts-node": "^8.8.1",
 		"vscode-debugadapter": "^1.39.1",
 		"vscode-debugprotocol": "1.39.0"
@@ -61,12 +62,12 @@
 	"devDependencies": {
 		"@types/mocha": "7.0.2",
 		"@types/node": "13.9.5",
+		"@types/vscode": "^1.50.0",
 		"electron-rebuild": "^1.10.1",
 		"minimist": "^1.2.5",
 		"tslint": "^6.1.0",
-		"typescript": "3.8.3",
+		"typescript": "^4.0.2",
 		"vsce": "1.74.0",
-		"vscode": "^1.1.36",
 		"vscode-debugadapter-testsupport": "1.40.2"
 	},
 	"resolutions": {
@@ -77,7 +78,7 @@
 	},
 	"main": "./out/extension",
 	"activationEvents": [
-		"onDebug",
+		"onDebugResolve:dezog",
 		"onCommand"
 	],
 	"contributes": {
@@ -90,19 +91,14 @@
 					"type": "boolean",
 					"scope": "resource"
 				},
-				"dezog.logfile": {
-					"description": "Write global logs to the given file.",
-					"type": "string",
-					"scope": "resource"
-				},
 				"dezog.socket.logpanel": {
 					"description": "Write socket logs to an output panel.",
 					"type": "boolean",
 					"scope": "resource"
 				},
-				"dezog.socket.logfile": {
-					"description": "Write socket logs to the given file.",
-					"type": "string",
+				"dezog.customcode.logpanel": {
+					"description": "Write logs regarding custom (js) code to an output panel.",
+					"type": "boolean",
 					"scope": "resource"
 				}
 			}
@@ -147,6 +143,11 @@
 			{
 				"command": "dezog.whatsNew",
 				"title": "Show 'What's New' page of this DeZog release.",
+				"category": "dezog"
+			},
+			{
+				"command": "dezog.help",
+				"title": "Show the DeZog Help page.",
 				"category": "dezog"
 			},
 			{
@@ -257,8 +258,7 @@
 					"launch": {
 						"required": [
 							"remoteType",
-							"rootFolder",
-							"listFiles"
+							"rootFolder"
 						],
 						"properties": {
 							"remoteType": {
@@ -278,6 +278,14 @@
 								"loadDelay": {
 									"type": "number",
 									"description": "An additional delay before the assembler program is loaded in ZEsarUX. Use this only if you have problems starting the debug session on Windows. Default: 100ms on Windows, 0ms on other systems."
+								},
+								"skipInterrupt": {
+									"type": "boolean",
+									"description": "Skips the interrupt during stepping. Defaults to false."
+								},
+								"resetOnLaunch": {
+									"type": "boolean",
+									"description": "Resets the device after starting the debugger before starting the program to debug. Defaults to true."
 								},
 								"socketTimeout": {
 									"type": "number",
@@ -299,35 +307,25 @@
 								}
 							},
 							"zsim": {
-								"loadZxRom": {
-									"type": "boolean",
-									"description": "Loads the 48K Spectrum ROM (or the 128K Spectrum ROM) at start. Otherwise the memory 0-0x3FFF is empty RAM.",
-									"default": true
-								},
 								"zxKeyboard": {
 									"type": "boolean",
 									"description": "If enabled the simulator shows a keyboard to simulate keypresses.",
 									"default": true
 								},
 								"visualMemory": {
+									"type": "boolean",
+									"description": "If enabled the simulator shows the access to the memory (0-0xFFFF) visually while the program is running.",
+									"default": "true"
+								},
+								"memoryModel": {
 									"type": "string",
-									"description": "If enabled the simulator shows the access to the memory (0-0xFFFF) visually while the program is running.\nDifferent views are possible:\n- 'none': no view\n- '64K': One memory area of 64K, no banks.\n- 'ZX48': ROM and RAM as of the ZX Spectrum 48K.\n- 'ZX128': Banked memory as of the ZX Spectrum 48K (16k slots/banks).\n- 'ZXNEXT': Banked memory as of the ZX Next (8k slots/banks). The default depends on the banking settings.",
-									"default": "ZX48"
+									"description": "Chooses the right memory model. I.e. how the memory maps if more than 64k is available.\nPossible values:\n'RAM': One memory area of 64K, no banks.\n- 'ZX48K': ROM and RAM as of the ZX Spectrum 48K.\n- 'ZX128K': Banked memory as of the ZX Spectrum 48K (16k slots/banks).\n- 'ZXNEXT': Banked memory as of the ZX Next (8k slots/banks). The default depends on the banking settings.",
+									"default": "RAM"
 								},
 								"ulaScreen": {
 									"type": "boolean",
 									"description": "If enabled it shows the contents of the ZX Spectrum screen.",
 									"default": true
-								},
-								"memoryPagingControl": {
-									"type": "boolean",
-									"description": "If enabled the ZX 128K memory banks can be paged in. Use this to simulate a ZX 128K.",
-									"default": false
-								},
-								"tbblueMemoryManagementSlots": {
-									"type": "boolean",
-									"description": "If enabled the ZX Next memory banking is enabled through registers 0x50-0x57.",
-									"default": false
 								},
 								"cpuLoadInterruptRange": {
 									"type": "number",
@@ -343,18 +341,42 @@
 									"type": "boolean",
 									"description": "Default is true if some ZX Spectrum feature is enabled otherwise false. If enabled an interrupt is generated after ca. 20ms (this assumes a CPU clock of 3.5MHz).",
 									"default": false
+								},
+								"cpuFrequency": {
+									"type": "number",
+									"description": "The CPU frequency is only used for output. I.e. when the t-states are printed there is also a printout of the correspondent time. This is calculated via the CPU frequency here.",
+									"default": 3500000
+								},
+								"customCode": {
+									"debug": {
+										"type": "boolean",
+										"description": "If true the zsim simulator view is put in debug mode which makes it easier to develop additional javascript code (see jsPath).",
+										"default": false
+									},
+									"jsPath": {
+										"type": "string",
+										"description": "A relative path to additional javascript code that is included into the Z80 simulator."
+									},
+									"uiPath": {
+										"type": "string",
+										"description": "A relative path to additional javascript code that is included into the Z80 simulator view/UI. This code acts as UI for the code in 'jsPath'"
+									},
+									"timeStep": {
+										"type": "number",
+										"description": "You can set a time step (interval) to call the tick() function. If not set then tick() will not be called (although time/t-states still do advance)."
+									}
 								}
 							},
 							"zxnext": {
-								"baudrate": {
-									"type": "number",
-									"description": "The baudrate. Note: If you change the baudrate here you also need to change the baudrate at the remote.",
-									"default": 230400
+								"hostname": {
+									"type": "string",
+									"description": "The hostname/IP address of the socket of the DeZog Serial Interface program. As this usually runs on the same PC as DeZog itself this parameter can be omitted (localhost).",
+									"default": "localhost"
 								},
 								"port": {
 									"type": "string",
-									"description": "The COM port. Nowadays this is normally USB/serial connection. E.g. /dev/tty.usbserial-#### on a Mac or COM1/COM2 etc. on Windows.",
-									"default": "/dev/tty.usbserial"
+									"description": "The port number of the socket of the DeZog Serial Interface program.Defaults to 12000.",
+									"default": "12000"
 								}
 							},
 							"unitTests": {
@@ -365,57 +387,103 @@
 								"type": "string",
 								"description": "The path of the root folder. All other paths are relative to this. Usually set to ${workspaceFolder}."
 							},
-							"listFiles": {
+							"sjasmplus": {
 								"type": "array",
-								"description": "All list files. (Typically only one, but it's possible to add more here. E.g. a commented ROM disassembly could be added as complement to the program's list file.)",
+								"description": "All sjasmplus list files. (Typically only one, but it's possible to add more here. E.g. a commented ROM disassembly could be added as complement to the program's list file.)",
 								"items": {
-									"anyOf": [
-										{
+									"type": "object",
+									"required": [
+										"path"
+									],
+									"properties": {
+										"path": {
 											"type": "string",
 											"description": "Path to the assembler .list file."
 										},
-										{
-											"type": "object",
-											"properties": {
-												"path": {
-													"type": "string",
-													"description": "Path to the assembler .list file."
-												},
-												"mainFile": {
-													"type": "string",
-													"description": "Path to the main assembler source file that was used to produce the .list file. For 'z80asm' the name is extracted automatically (i.e. not needed), for 'sjasmplus' and 'z88dk' you can provide the source file name here.",
-													"default": null
-												},
-												"srcDirs": {
-													"type": "array",
-													"description": "If defined the files referenced in the list file will be used for stepping otherwise the list file itself will be used. The source directories are given here either as an array of strings. All dirs are relative to the 'rootFolder'.",
-													"default": [
-														""
-													]
-												},
-												"filter": {
-													"type": "string",
-													"description": "You can add a filter with a regular expression here. On reading of the .list file the regular expression is applied on every line. This can be used e.g. to turn a list file of an unsupported assembler into a format that is understood by dezog. Can be omitted.\nExample: '/^[0-9]+\\s+//'. The line number at the start of each line is deleted.\nIs not required for 'z80asm', 'sjasmplus' or 'z88dk'.",
-													"default": null
-												},
-												"asm": {
-													"type": "string",
-													"description": "The used assembler. 'sjasmplus' (default), 'z80asm' or 'z88dk'.",
-													"default": "z80asm"
-												},
-												"addOffset": {
-													"type": "number",
-													"description": "To add an offset to each address in the .list file. Could be used if the addresses in the list file do not start at the ORG.",
-													"default": 0
-												},
-												"z88dkMapFile": {
-													"type": "string",
-													"description": "Is required only for z88dk. The map file is required to correctly parse the label values and to get correct file/line to address associations.",
-													"default": 0
-												}
-											}
+										"srcDirs": {
+											"type": "array",
+											"description": "If defined the files referenced in the list file will be used for stepping otherwise the list file itself will be used. The source directories are given here as an array of strings. All dirs are relative to the 'rootFolder'.",
+											"default": [
+												""
+											]
+										},
+										"excludeFiles": {
+											"type": "array",
+											"description": "An array of glob patterns with filenames to exclude. The filenames (from the 'include' statement) that do match will not be associated with executed addresses. I.e. those source files are not shown during stepping. You normally only need this if you have multiple source files that share the same addresses. In that case one of the source files is shown. If that is the wrong one you can exclude it here.",
+											"default": []
+										},
+										"disableBanking": {
+											"type": "boolean",
+											"description": "SLD files bank information to the addresses. If this is set all addresses are turned into simple 64k addresses as with list files.",
+											"default": false
 										}
-									]
+									}
+								}
+							},
+							"z80asm": {
+								"type": "array",
+								"description": "All list files. (Typically only one, but it's possible to add more here. E.g. a commented ROM disassembly could be added as complement to the program's list file.)",
+								"items": {
+									"type": "object",
+									"required": [
+										"path"
+									],
+									"properties": {
+										"path": {
+											"type": "string",
+											"description": "Path to the assembler .list file."
+										},
+										"srcDirs": {
+											"type": "array",
+											"description": "If defined the files referenced in the list file will be used for stepping otherwise the list file itself will be used. The source directories are given here either as an array of strings. All dirs are relative to the 'rootFolder'.",
+											"default": [
+												""
+											]
+										},
+										"excludeFiles": {
+											"type": "array",
+											"description": "An array of glob patterns with filenames to exclude. The filenames (from the 'include' statement) that do match will not be associated with executed addresses. I.e. those source files are not shown during stepping. You normally only need this if you have multiple source files that share the same addresses. In that case one of the source files is shown. If that is the wrong one you can exclude it here.",
+											"default": []
+										}
+									}
+								}
+							},
+							"z88dk": {
+								"type": "array",
+								"description": "All list files. (Typically only one, but it's possible to add more here. E.g. a commented ROM disassembly could be added as complement to the program's list file.)",
+								"items": {
+									"type": "object",
+									"required": [
+										"path"
+									],
+									"properties": {
+										"path": {
+											"type": "string",
+											"description": "Path to the assembler .list file."
+										},
+										"srcDirs": {
+											"type": "array",
+											"description": "If defined the files referenced in the list file will be used for stepping otherwise the list file itself will be used. The source directories are given here as an array of strings. All dirs are relative to the 'rootFolder'.",
+											"default": [
+												""
+											]
+										},
+										"excludeFiles": {
+											"type": "array",
+											"description": "An array of glob patterns with filenames to exclude. The filenames (from the 'include' statement) that do match will not be associated with executed addresses. I.e. those source files are not shown during stepping. You normally only need this if you have multiple source files that share the same addresses. In that case one of the source files is shown. If that is the wrong one you can exclude it here.",
+											"default": []
+										},
+										"mainFile": {
+											"type": "string",
+											"description": "Path to the main assembler source file that was used to produce the .list file.",
+											"default": null
+										},
+										"mapFile": {
+											"type": "string",
+											"description": "Is required only for z88dk. The map file is required to correctly parse the label values and to get correct file/line to address associations.",
+											"default": 0
+										}
+									}
 								}
 							},
 							"smallValuesMaximum": {
@@ -426,9 +494,15 @@
 							"disassemblerArgs": {
 								"description": "Arguments passed to the disassembler.",
 								"properties": {
+									"numberOfLines": {
+										"type": "number",
+										"description": "The number of lines displayed in the disassembly.",
+										"default": 10
+									},
 									"esxdosRst": {
 										"type": "boolean",
-										"description": "For esxdos disassembly set this to 'true'."
+										"description": "For esxdos disassembly set this to 'true'.",
+										"default": false
 									}
 								}
 							},
@@ -450,7 +524,7 @@
 							},
 							"loadObjs": {
 								"type": "array",
-								"description": "List of one or many object files, i.e. memory dumps. (Optional)",
+								"description": "List of one or many object files, i.e. memory dumps. Contains of 'path' and 'start' address. (Optional)",
 								"items": {
 									"type": "object",
 									"properties": {
@@ -469,20 +543,12 @@
 								"type": "boolean",
 								"description": "Start automatically after launch. Default is false."
 							},
-							"resetOnLaunch": {
-								"type": "boolean",
-								"description": "Resets the cpu (on emulator) after starting the debugger before starting the program to debug."
-							},
 							"commandsAfterLaunch": {
 								"type": "array",
 								"description": "An array with commands that are executed after the program-to-debug is loaded. With '-e' or '-exec' you can pass commands to the debugger directly.",
 								"items": {
 									"type": "string"
 								}
-							},
-							"skipInterrupt": {
-								"type": "boolean",
-								"description": "Skips the interrupt during stepping."
 							},
 							"history": {
 								"reverseDebugInstructionCount": {
@@ -492,6 +558,10 @@
 								"spotCount": {
 									"type": "number",
 									"description": "Sets the number of instructions to show in a spot. If you set this e.g. to 5 then the 5 previous and the 5 next instructions related to the current position are shown. Use 0 to disable. Default is 10."
+								},
+								"spotShowRegisters": {
+									"type": "boolean",
+									"description": "If true it shows the changed register values in the spot history. You can disable the feature here. Defaults to true."
 								},
 								"codeCoverageEnabled": {
 									"type": "boolean",
@@ -593,6 +663,63 @@
 						}
 					}
 				},
+				"initialConfigurations": [
+					{
+						"type": "dezog",
+						"request": "launch",
+						"name": "Simulator",
+						"remoteType": "zsim",
+						"zsim": {
+							"memoryModel": "ZX48K"
+						},
+						"sjasmplus": [
+							{
+								"path": "your_sld_file"
+							}
+						],
+						"topOfStack": "your_stack_top",
+						"load": "your_sna_or_nex_file"
+					},
+					{
+						"type": "dezog",
+						"request": "launch",
+						"name": "ZEsarUX",
+						"remoteType": "zrcp",
+						"sjasmplus": [
+							{
+								"path": "your_sld_file"
+							}
+						],
+						"topOfStack": "your_stack_top",
+						"load": "your_sna_or_nex_file"
+					},
+					{
+						"type": "dezog",
+						"request": "launch",
+						"name": "CSpect",
+						"remoteType": "cspect",
+						"sjasmplus": [
+							{
+								"path": "your_sld_file"
+							}
+						],
+						"topOfStack": "your_stack_top",
+						"load": "your_sna_or_nex_file"
+					},
+					{
+						"type": "dezog",
+						"request": "launch",
+						"name": "ZXNext",
+						"remoteType": "zxnext",
+						"sjasmplus": [
+							{
+								"path": "your_sld_file"
+							}
+						],
+						"topOfStack": "your_stack_top",
+						"load": "your_sna_or_nex_file"
+					}
+				],
 				"configurationSnippets": [
 					{
 						"label": "DeZog: Launch",
@@ -602,21 +729,16 @@
 							"request": "launch",
 							"name": "DeZog",
 							"remoteType": "zsim",
-							"zrcp": {
-								"port": 10000
-							},
-							"cspect": {
-								"port": 10000
-							},
 							"zsim": {
-								"machine": "loadZxRom"
+								"memoryModel": "RAM"
 							},
+							"zrcp": {},
+							"cspect": {},
 							"zxnext": {
-								"baudrate": 230400,
 								"port": "/dev/tty.usbserial"
 							},
 							"topOfStack": "stack_top",
-							"listFiles": [
+							"sjasmplus": [
 								{
 									"path": "path_to_your_assembler_file.list"
 								}
@@ -625,7 +747,6 @@
 								"esxdosRst": true
 							},
 							"load": "path_to_your_sna_file.sna",
-							"skipInterrupt": true,
 							"codeCoverage": false
 						}
 					}

@@ -1,40 +1,49 @@
 import { DebugProtocol } from 'vscode-debugprotocol/lib/debugProtocol';
 import { Utility } from './misc/utility';
-//import * as path from 'path';
 import * as fs from 'fs';
+import {UnifiedPath} from './misc/unifiedpath';
 
-/**
- * together with a boolean variable to tell (true) if the referenced files should be used and a filter string to allow
- * list files from not supported assemblers.
- */
-export interface ListFile {
 
-	/// The path to the file.
+
+/// Base for all assembler configurations.
+export interface AsmConfigBase {
+
+	/// The path to the list file.
 	path: string;
-
-	/// Path to the main assembler source file that was used to produce the .list file.
-	/// For 'z80asm' the name can be extracted automatically, for 'sjasmplus' and 'z88dk'
-	/// you can provide the source file here.
-	mainFile: string;
 
 	/// If defined the files referenced in the list file will be used for stepping otherwise the list file itself will be used.
 	/// The path(s) here are relative to the 'rootFolder'.
 	/// It is also possible to add several paths. Files are checked one after the other: first sources path, second sources path, ... last sources path.
 	srcDirs: Array<string>;
 
-	/// An optional filter string that is applied to the list file when it is read. Used to support z88dk list files.
-	filter:string|undefined;
-
-	/// Used assembler: "z80asm", "z88dk" or "sjasmplus" (default).
-	/// The list file is read differently. Especially the includes are handled differently.
-	asm: string;
-
-	/// To add an offset to each address in the .list file. Could be used if the addresses in the list file do not start at the ORG (as with z88dk).
-	addOffset: number;
-
-	/// The z88dk map file (option "-m"). This should be used with z88dk list-files (.lis) instead of the deprecated addOffset.
-	z88dkMapFile: string;
+	// An array of glob patterns with filenames to exclude. The filenames (from the 'include' statement) that do match will not be associated with executed addresses. I.e. those source files are not used shown during stepping.
+	excludeFiles: Array<string>;
 }
+
+
+/// sjasmplus
+export interface SjasmplusConfig extends AsmConfigBase {
+	// Note: In sjasmplus the 'path' can be used either for a list file or for a sld file.
+
+	// SLD files work with addresses+bank information. If this is set all addresses are turned into simple 64k addresses as with list files.
+	disableBanking: boolean;
+}
+
+
+/// Z80Asm
+export interface Z80asmConfig extends AsmConfigBase {
+}
+
+
+// Z88dk
+export interface Z88dkConfig extends AsmConfigBase {
+	/// Path to the main assembler source file that was used to produce the .list file.
+	mainFile: string;
+
+	/// The z88dk map file (option "-m").
+	mapFile: string;
+}
+
 
 
 export interface Formatting {
@@ -88,6 +97,9 @@ export interface ZrcpType {
 	// The delay before loading the Z80 program via smartload.
 	loadDelay: number;
 
+	/// Resets the cpu (on ZEsarUX) after starting the debugger.
+	resetOnLaunch: boolean;
+
 	/// The socket timeout in seconds.
 	socketTimeout: number;
 }
@@ -119,32 +131,57 @@ export interface ZxNextSocketType {
 }
 
 
+// Subtype for the custom javascript code.
+export interface CustomCodeType {
+	// If true the zsim simulator view is put in debug mode which makes it easier to develop additional javascript code (see jsPath).
+	debug: boolean;
+
+	// A relative path to additional javascript code that is included into the Z80 simulator.
+	jsPath: string;
+
+	// A relative path to additional javascript code that is included into the Z80 simulator UI panel.
+	uiPath: string;
+
+	// You can set a time step (interval) to call the tick() function.
+	timeStep: number;
+}
+
+
 /// Definitions for the 'zsim' remote type.
-export interface ZxSimType {
-	// Loads the 48K Spectrum ROM (or the 128K Spectrum ROM) at start. Otherwise the memory 0-0x3FFF is empty RAM.
-	loadZxRom: boolean,
+export interface ZSimType {
 	// If enabled the simulator shows a keyboard to simulate keypresses.
 	zxKeyboard: boolean,
+
 	// If enabled the simulator shows the access to the memory (0-0xFFFF) visually while the program is running.
-	// Different views are possible:
-	// - "none": no view
-	// - "64K": One memory area of 64K, no banks.
+	visualMemory: boolean,
+
+	// If enabled it shows the contents of the ZX Spectrum screen.
+	ulaScreen: boolean,
+
+	// If enabled the ZX 128K memory banks can be paged in. Use this to simulate a ZX 128K.
+
+	// Memory model: ZX48k, ZX128K or ZXNext.
+	// - "RAM": One memory area of 64K RAM, no banks.
 	// - "ZX48": ROM and RAM as of the ZX Spectrum 48K.
 	// - "ZX128": Banked memory as of the ZX Spectrum 48K (16k slots/banks).
 	// - "ZXNEXT": Banked memory as of the ZX Next (8k slots/banks).
-	visualMemory: string,
-	// If enabled it shows the contents of the ZX Spectrum screen.
-	ulaScreen: boolean,
-	// If enabled the ZX 128K memory banks can be paged in. Use this to simulate a ZX 128K.
-	memoryPagingControl: boolean,
-	// If enabled the ZX Next memory banking is enabled through registers 0x50-0x57.
-	tbblueMemoryManagementSlots: boolean,
+	memoryModel: string;
+
 	// The number of interrupts to calculate the average from. 0 to disable.
 	cpuLoadInterruptRange: number,
+
 	// If enabled the Z80N extended instructions are supported.
 	Z80N: boolean,
+
 	// If enabled an interrupt is generated after ca. 20ms (this assumes a CPU clock of 3.5MHz).
 	vsyncInterrupt: boolean,
+
+	// The CPU frequency is only used for output. I.e. when the t-states are printed
+	// there is also a printout of the correspondent time. This is calculated via the CPU frequency here.
+	cpuFrequency: number,
+
+	// Settings to execute custom javascript code inside the zsim simulator.
+	customCode: CustomCodeType;
 }
 
 
@@ -163,7 +200,7 @@ export interface SettingsParameters extends DebugProtocol.LaunchRequestArguments
 	cspect: CSpectType;
 
 	// The special settings for the internal Z80 simulator.
-	zsim: ZxSimType;
+	zsim: ZSimType;
 
 	// The special settings for the serial connection.
 	zxnext: ZxNextSocketType;
@@ -171,11 +208,14 @@ export interface SettingsParameters extends DebugProtocol.LaunchRequestArguments
 	/// true if the configuration is for unit tests.
 	unitTests: false;
 
-	/// The path of the root folder. All other paths are relative to this. Ususally = ${workspaceFolder}
+	/// The path of the root folder. All other paths are relative to this. Usually = ${workspaceFolder}
 	rootFolder: string;
 
-	/// The paths to the .list files.
-	listFiles: Array<ListFile>;
+	/// The paths to the .list files / assembler parameters.
+	sjasmplus: Array<SjasmplusConfig>;
+	z80asm: Array<Z80asmConfig>;
+	z88dk: Array<Z88dkConfig>;
+
 
 	/// The paths to the .labels files.
 	//labelsFiles: Array<string>;
@@ -184,7 +224,10 @@ export interface SettingsParameters extends DebugProtocol.LaunchRequestArguments
 	smallValuesMaximum: number;
 
 	/// These arguments are passed to the disassembler (z80dismblr arguments).
-	disassemblerArgs: {esxdosRst: boolean};
+	disassemblerArgs: {
+		numberOfLines: number,	// Number of lines displayed in the disassembly
+		esxdosRst: boolean	// If enabled the disassembler will disassemble "RST 8; defb N" correctly.
+	};
 
 	/// A directory for temporary files created by this debug adapter. E.g. ".tmp"
 	tmpDir: string;
@@ -205,9 +248,6 @@ export interface SettingsParameters extends DebugProtocol.LaunchRequestArguments
 	/// Start automatically after launch.
 	startAutomatically: boolean;
 
-	/// Resets the cpu (on emulator) after starting the debugger.
-	resetOnLaunch: boolean;
-
 	/// An array with commands that are executed after the program-to-debug is loaded.
 	commandsAfterLaunch: Array<string>;
 
@@ -216,6 +256,7 @@ export interface SettingsParameters extends DebugProtocol.LaunchRequestArguments
 	history: {
 		reverseDebugInstructionCount: number;	// Sets the number of instructions for reverse debugging. If set to 0 then reverse debugging is turned off.
 		spotCount: number;	// Sets the number of instructions to show in a spot. If you set this e.g. to 5 then the 5 previous and the 5 next instructions related to the current position are shown.
+		spotShowRegisters: boolean;	// If true it shows additionally the changed registers. Default=true.
 		codeCoverageEnabled: boolean;	// Enable/disable code coverage.
 	}
 
@@ -275,8 +316,9 @@ export class Settings {
 				zxnext: <any>undefined,
 				unitTests: <any>undefined,
 				rootFolder: <any>undefined,
-				listFiles: <any>undefined,
-//				labelsFiles: <any>undefined,
+				sjasmplus: <any>undefined,
+				z80asm: <any>undefined,
+				z88dk: <any>undefined,
 				smallValuesMaximum: <any>undefined,
 				disassemblerArgs: <any>undefined,
 				tmpDir: <any>undefined,
@@ -285,7 +327,6 @@ export class Settings {
 				load: <any>undefined,
 				loadObjs: <any>undefined,
 				startAutomatically: <any>undefined,
-				resetOnLaunch: <any>undefined,
 				commandsAfterLaunch: <any>undefined,
 				history: <any>undefined,
 				formatting: <any>undefined,
@@ -314,6 +355,8 @@ export class Settings {
 				delay=100;
 			Settings.launch.zrcp.loadDelay=delay;	// ms
 		}
+		if (Settings.launch.zrcp.resetOnLaunch == undefined)
+			Settings.launch.zrcp.resetOnLaunch = true;
 		if (!Settings.launch.zrcp.socketTimeout)
 			Settings.launch.zrcp.socketTimeout=5;	// 5 secs
 
@@ -329,47 +372,42 @@ export class Settings {
 
 		// zsim
 		if (!Settings.launch.zsim)
-			Settings.launch.zsim={} as ZxSimType;
-		if (Settings.launch.zsim.loadZxRom==undefined)
-			Settings.launch.zsim.loadZxRom=true;
+			Settings.launch.zsim={} as ZSimType;
 		if (Settings.launch.zsim.zxKeyboard==undefined)
-			Settings.launch.zsim.zxKeyboard=true;
+			Settings.launch.zsim.zxKeyboard=false;
 		if (Settings.launch.zsim.ulaScreen==undefined)
-			Settings.launch.zsim.ulaScreen=true;
-		if (Settings.launch.zsim.memoryPagingControl==undefined)
-			Settings.launch.zsim.memoryPagingControl=false;
-		if (Settings.launch.zsim.tbblueMemoryManagementSlots==undefined)
-			Settings.launch.zsim.tbblueMemoryManagementSlots=false;
+			Settings.launch.zsim.ulaScreen=false;
 		if (Settings.launch.zsim.cpuLoadInterruptRange==undefined)
 			Settings.launch.zsim.cpuLoadInterruptRange=1;
-		if (Settings.launch.zsim.visualMemory==undefined) {
-			// try to guess visual memory from the other settings
-			if (Settings.launch.zsim.tbblueMemoryManagementSlots)
-				Settings.launch.zsim.visualMemory="ZXNEXT";
-			else if (Settings.launch.zsim.memoryPagingControl)
-				Settings.launch.zsim.visualMemory="ZX128";
-			else if (Settings.launch.zsim.loadZxRom)
-				Settings.launch.zsim.visualMemory="ZX48";
-			else
-				Settings.launch.zsim.visualMemory="64K";
+		if (Settings.launch.zsim.visualMemory==undefined)
+			Settings.launch.zsim.visualMemory=true;
+		if (Settings.launch.zsim.memoryModel==undefined)
+			Settings.launch.zsim.memoryModel="RAM";
+		Settings.launch.zsim.memoryModel=Settings.launch.zsim.memoryModel.toUpperCase();
+		if (Settings.launch.zsim.Z80N==undefined)
+			Settings.launch.zsim.Z80N = false;
+		if (Settings.launch.zsim.vsyncInterrupt == undefined)
+			Settings.launch.zsim.vsyncInterrupt = false;
+		if (Settings.launch.zsim.cpuFrequency == undefined)
+			Settings.launch.zsim.cpuFrequency = 3500000.0;	// 3500000.0 for 3.5MHz.
+
+		// zsim custom code
+		if (Settings.launch.zsim.customCode==undefined) {
+			Settings.launch.zsim.customCode={} as any;
 		}
-		if (Settings.launch.zsim.Z80N==undefined) {
-			// try to guess Z80N visual memory from the other settings
-			if (Settings.launch.zsim.tbblueMemoryManagementSlots)
-				Settings.launch.zsim.Z80N=true;
-			else
-				Settings.launch.zsim.Z80N=false;
-		} if (Settings.launch.zsim.vsyncInterrupt==undefined) {
-			// try to guess vsyncInterrupt from the other settings
-			if (Settings.launch.zsim.tbblueMemoryManagementSlots
-				||Settings.launch.zsim.loadZxRom
-				||Settings.launch.zsim.zxKeyboard
-				||Settings.launch.zsim.ulaScreen
-				||Settings.launch.zsim.memoryPagingControl
-			)
-				Settings.launch.zsim.vsyncInterrupt=true;
-			else
-				Settings.launch.zsim.vsyncInterrupt=false;
+		if (Settings.launch.zsim.customCode.debug==undefined)
+			Settings.launch.zsim.customCode.debug=false;
+		if (Settings.launch.zsim.customCode.jsPath!=undefined) {
+			const path=UnifiedPath.getUnifiedPath(Settings.launch.zsim.customCode.jsPath);
+			Settings.launch.zsim.customCode.jsPath=Utility.getAbsFilePath(path);
+		}
+		if (Settings.launch.zsim.customCode.uiPath!=undefined) {
+			const path=UnifiedPath.getUnifiedPath(Settings.launch.zsim.customCode.uiPath);
+			Settings.launch.zsim.customCode.uiPath=Utility.getAbsFilePath(path);
+		}
+		if (Settings.launch.zsim.customCode.timeStep==undefined) {
+			// In fact: never call tick()
+			Settings.launch.zsim.customCode.timeStep=Number.MAX_SAFE_INTEGER;
 		}
 
 		// zxnext
@@ -380,75 +418,118 @@ export class Settings {
 		if (Settings.launch.zxnext.port==undefined)
 			Settings.launch.zxnext.port=12000;
 		if (!Settings.launch.zxnext.socketTimeout)
-			Settings.launch.zxnext.socketTimeout=0.5;	// 0.5 secs, needs to be short to show a warning fast if debugged program is running.
-
-
+			Settings.launch.zxnext.socketTimeout=0.8;	// 0.8 secs, needs to be short to show a warning fast if debugged program is running.
 
 		if(!Settings.launch.rootFolder)
-			Settings.launch.rootFolder = rootFolder;
-		if(Settings.launch.listFiles)
-			Settings.launch.listFiles = Settings.launch.listFiles.map(fp => {
+			Settings.launch.rootFolder=rootFolder;
+
+		// sjasmplus
+		if (Settings.launch.sjasmplus) {
+			Settings.launch.sjasmplus=Settings.launch.sjasmplus.map(fp => {
 				// ListFile structure
-				const file = {
-					path: Utility.getAbsFilePath(fp.path),
-					mainFile: fp.mainFile,
-					srcDirs: fp.srcDirs || [""],
-					filter: fp.filter,
-					asm: fp.asm || "sjasmplus",
-					addOffset: fp.addOffset||0,
-					z88dkMapFile: fp.z88dkMapFile
+				const fpPath=UnifiedPath.getUnifiedPath(fp.path);
+				const fpSrcDirs=UnifiedPath.getUnifiedPathArray(fp.srcDirs);
+				const fpExclFiles=UnifiedPath.getUnifiedPathArray(fp.excludeFiles);
+				const file={
+					path: undefined as any,
+					srcDirs: fpSrcDirs||[""],
+					excludeFiles: fpExclFiles || [],
+					disableBanking: fp.disableBanking || false
 				};
-				/*
-				// Add the root folder path to each.
-				const rootFolder=Settings.launch.rootFolder;
-				const srcds=file.srcDirs.map(srcPath => path.join(rootFolder, srcPath));
-				file.srcDirs = srcds;
-				*/
+				if (fpPath)
+					file.path = Utility.getAbsFilePath(fpPath)
 				return file;
 			});
-		else
-			Settings.launch.listFiles = [];
+		}
 
-		/*
-		if(Settings.launch.labelsFiles)
-			Settings.launch.labelsFiles = Settings.launch.labelsFiles.map((fp) => Utility.getAbsFilePath(fp));
-		else
-			Settings.launch.labelsFiles = [];
-		*/
+		// z80asm
+		if (Settings.launch.z80asm) {
+			Settings.launch.z80asm=Settings.launch.z80asm.map(fp => {
+				// ListFile structure
+				const fpPath=UnifiedPath.getUnifiedPath(fp.path);
+				const fpSrcDirs=UnifiedPath.getUnifiedPathArray(fp.srcDirs);
+				const fpExclFiles=UnifiedPath.getUnifiedPathArray(fp.excludeFiles);
+				const file={
+					path: undefined as any,
+					srcDirs: fpSrcDirs||[""],
+					excludeFiles: fpExclFiles||[]
+				};
+				if (fpPath)
+					file.path = Utility.getAbsFilePath(fpPath)
+				return file;
+			});
+		}
 
-		if(!Settings.launch.topOfStack)
+		// z88dk
+		if (Settings.launch.z88dk) {
+			Settings.launch.z88dk=Settings.launch.z88dk.map(fp => {
+				// ListFile structure
+				const fpPath=UnifiedPath.getUnifiedPath(fp.path);
+				const fpSrcDirs=UnifiedPath.getUnifiedPathArray(fp.srcDirs);
+				const fpMapFile=UnifiedPath.getUnifiedPath(fp.mapFile);
+				const fpExclFiles=UnifiedPath.getUnifiedPathArray(fp.excludeFiles);
+				const fpMainFile=UnifiedPath.getUnifiedPath(fp.mainFile);
+				const file={
+					path: undefined as any,
+					srcDirs: fpSrcDirs||[""],
+					excludeFiles: fpExclFiles||[],
+					mainFile: fpMainFile||"",
+					mapFile: undefined as any
+				};
+				if (fpPath)
+					file.path = Utility.getAbsFilePath(fpPath)
+				if (fpMapFile)
+					file.mapFile = Utility.getAbsFilePath(fpMapFile);
+				return file;
+			});
+		}
+
+
+		if (!Settings.launch.topOfStack)
 			Settings.launch.topOfStack = '0x10000';
 		if(unitTests)
 			Settings.launch.topOfStack = 'UNITTEST_STACK';
 
-		if(Settings.launch.load)
-			Settings.launch.load = Utility.getAbsFilePath(Settings.launch.load);
+		if (Settings.launch.load) {
+			const uload=UnifiedPath.getUnifiedPath(Settings.launch.load)
+			Settings.launch.load=Utility.getAbsFilePath(uload);
+		}
 		else
 			Settings.launch.load = '';
 
 		if(!Settings.launch.loadObjs)
 			Settings.launch.loadObjs = [];
 		for(let loadObj of Settings.launch.loadObjs) {
-			if(loadObj.path)
-				loadObj.path = Utility.getAbsFilePath(loadObj.path);
+			if (loadObj.path) {
+				const loadObjPath=UnifiedPath.getUnifiedPath(loadObj.path)
+				loadObj.path=Utility.getAbsFilePath(loadObjPath);
+			}
 			else
 				loadObj.path = '';
 		}
 
 		if(Settings.launch.tmpDir == undefined)
-			Settings.launch.tmpDir = '.tmp';
-		Settings.launch.tmpDir = Utility.getAbsFilePath
-		(Settings.launch.tmpDir);
+			Settings.launch.tmpDir='.tmp';
+		Settings.launch.tmpDir=UnifiedPath.getUnifiedPath(Settings.launch.tmpDir);
+		Settings.launch.tmpDir=Utility.getAbsFilePath
+			(Settings.launch.tmpDir);
 		if(isNaN(Settings.launch.smallValuesMaximum))
 			Settings.launch.smallValuesMaximum = 255;
 		if(Settings.launch.disassemblerArgs == undefined)
-			Settings.launch.disassemblerArgs = {esxdosRst: false};
-		if(!Settings.launch.disassemblerArgs.hasOwnProperty("esxdosRst"))
-			Settings.launch.disassemblerArgs.esxdosRst = false;
+			Settings.launch.disassemblerArgs={
+				numberOfLines: 10,
+				esxdosRst: false
+			};
+		if (!Settings.launch.disassemblerArgs.hasOwnProperty("numberOfLines"))
+			Settings.launch.disassemblerArgs.numberOfLines=10;
+		if (Settings.launch.disassemblerArgs.numberOfLines>100)
+			Settings.launch.disassemblerArgs.numberOfLines=100;
+		if (Settings.launch.disassemblerArgs.numberOfLines<1)
+			Settings.launch.disassemblerArgs.numberOfLines=1;
+		if (!Settings.launch.disassemblerArgs.hasOwnProperty("esxdosRst"))
+			Settings.launch.disassemblerArgs.esxdosRst=false;
 		if(Settings.launch.startAutomatically == undefined)
 			Settings.launch.startAutomatically = (unitTests) ? false : false;
-		if(Settings.launch.resetOnLaunch == undefined)
-			Settings.launch.resetOnLaunch = true;
 		if(Settings.launch.commandsAfterLaunch == undefined)
 			Settings.launch.commandsAfterLaunch = [];
 		if (Settings.launch.zrcp.skipInterrupt == undefined)
@@ -469,6 +550,8 @@ export class Settings {
 			Settings.launch.history.spotCount = Settings.launch.history.reverseDebugInstructionCount;
 		if(Settings.launch.history.spotCount < 0)
 			Settings.launch.history.spotCount = 0;
+		if (Settings.launch.history.spotShowRegisters==undefined)
+			Settings.launch.history.spotShowRegisters=true;
 
 		// Code coverage
 		if (Settings.launch.history.codeCoverageEnabled==undefined) {
@@ -559,6 +642,25 @@ export class Settings {
 
 
 	/**
+	 * Returns all xxxListFiles parameters in an array.
+	 * This is used to run checks on the common parameters.
+	 * @param configuration The launch configuration, e.g. Settings.launch.
+	 * @returns An array of list file parameters.
+	 */
+	public static GetAllAssemblerListFiles(configuration: any): Array<AsmConfigBase> {
+		const listFiles=new Array<AsmConfigBase>();
+		if (configuration.sjasmplus)
+			listFiles.push(...configuration.sjasmplus);
+		if (configuration.z80asm)
+			listFiles.push(...configuration.z80asm);
+		if (configuration.z88dk)
+			listFiles.push(...configuration.z88dk);
+
+		return listFiles;
+	}
+
+
+	/**
 	 * Checks the settings and throws an exception if something is wrong.
 	 * E.g. it checks for the existence of file paths.
 	 * Note: file paths are already expanded to absolute paths.
@@ -567,27 +669,44 @@ export class Settings {
 		// Check remote type
 		const rType=Settings.launch.remoteType;
 		const allowedTypes=['zrcp', 'cspect', 'zxnext', 'zsim'];
-		const found = (allowedTypes.indexOf(rType) >= 0);
+		const found=(allowedTypes.indexOf(rType)>=0);
 		if (!found) {
-			throw Error("Remote type '" + rType + "' does not exist. Allowed are " + allowedTypes.join(', ') + ".");
+			throw Error("'remoteType': Remote type '"+rType+"' does not exist. Allowed are "+allowedTypes.join(', ')+".");
 		}
 
-		// List files
-		for(let listFile of Settings.launch.listFiles) {
-			// Check that file exists
+		// List files (=Assembler configurations)
+		const listFiles=this.GetAllAssemblerListFiles(Settings.launch);
+		for (let listFile of listFiles) {
 			const path = listFile.path;
+			if (path == undefined)
+				throw Error("'path': You need to define a path to your file.");
+			// Check that file exists
 			if(!fs.existsSync(path))
-				throw Error("File '" + path + "' does not exist.");
+				throw Error("'path': File '" + path + "' does not exist.");
+		}
+
+		// Any special check
+		if (Settings.launch.z88dk) {
+			// Check for z88dk map file
+			const listFiles=Settings.launch.z88dk;
+			for (const listFile of listFiles) {
+				const mapFile=listFile.mapFile;
+				if (mapFile==undefined)
+					throw Error("'z88dk.mapFile': For z88dk you have to define a map file.");
+				// Check that file exists
+				if (!fs.existsSync(mapFile))
+					throw Error("'z88dk.mapFile': '"+mapFile+"' does not exist.");
+			}
 		}
 
 		// sna/tap
 		if(Settings.launch.load) {
 			// Check that file exists
 			if(!fs.existsSync(Settings.launch.load))
-				throw Error("File '" + Settings.launch.load + "' does not exist.");
+				throw Error("'load': File '" + Settings.launch.load + "' does not exist.");
 			// If sna or tap is given it is not allowed to use an execAddress
 			if(Settings.launch.execAddress)
-				throw Error("You load a .sna or .tap file. In that case the execution address is already known from the file and you cannot set it explicitly via 'execAddress'.");
+				throw Error("'execAddress': You load a .sna or .tap file. In that case the execution address is already known from the file and you cannot set it explicitly via 'execAddress'.");
 		}
 
 		// Object files
@@ -595,10 +714,10 @@ export class Settings {
 			// Check that file exists
 			const path = loadObj.path;
 			if(!fs.existsSync(path))
-				throw Error("File '" + path + "' does not exist.");
+				throw Error("'loadObj.path': File '" + path + "' does not exist.");
 			// Check that start address is given
 			if(loadObj.start == undefined)
-				throw Error("You must specify a 'start' address for '" + path + "'.");
+				throw Error("'loadObj.start': You must specify a 'start' address for '" + path + "'.");
 		}
 	}
 }

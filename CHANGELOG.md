@@ -1,5 +1,88 @@
 # Changelog
 
+# 2.0.3
+- Fixed #39: windows path back slash in SLD file.
+- cspect, zsim: LOGPOINT, ASSERTION are printed also on step-over, step-into.
+
+# 2.0.2
+- Help view added. Palette command "dezog.help".
+- New "zsim" option to set the "cpuFrequency".
+- "resetOnLaunch" moved to "zrcp".
+- ASSERTION for ZEsarUX implemented.
+
+# 2.0.1
+- Logging to files removed. vscode does this anyway.
+- sjasmplus list file support disabled.
+
+# 2.0.0
+- Fix in sendDzrpCmd: length of transmitted bytes fixed.
+- Improvements to unit tests. Now ASSERTIONs show the failure values.
+- "sjasmplus" configuration now uses the SLD file instead of a list file to support banking information (long addresses). If you want to use 64k addresses instead there is a new option "disableBanking".
+- launch.json: deprecated option "filter" has been removed.
+- "zsim": Support for custom code added. E.g. it is possible now to add custom peripheral code to implement ports. You can now write code to support peripherals within zsim.
+  - Support for in-ports, out-ports and to generate an interrupt.
+  - Support to create a custom UI within the ZSimulationView.
+  - See [documentation/zsimPeripherals.md](documentation/zsimPeripherals.md) for more details.
+	- New commands
+		- out: Output to port.
+		- in: input from port.
+		- tstates add/set: change t-states.
+	- launch.json: Added parameters for custom code:
+		- customCode.debug: Enables a few debug buttons in ZSimulationView
+		- customCode.jsPath: Path to the custom javascript file.
+		- customCode.uiPath: Path to the custom html UI.
+		- customCode.timeStep: The t-state interval for reporting.
+- "zsim": changed parameters:
+	- Removed: "memoryPagingControl", "tbblueMemoryManagementSlots", "loadZxRom"
+	- Added: "memoryModel": "RAM", "ZX48K", "ZX128K", "ZXNEXT"
+	- Changed: "visualMemory" to boolean.
+- For Kris: Changed naming of "ASSERT" to "ASSERTION" to avoid conflicts with commented sjasmplus ASSERTs. (Also the command was renamed from "-ASSERT" to "-ASSERTION".)
+- 'find' enabled on webviews.
+- Fixed a bug in highlighting register addresses in the MemoryRegisterView .
+- spotHistory now also displays the changed registers.
+- Fixed: during time-travel it is not possible anymore to change the registers.
+- Fixed a bug with UNKNOWN label in call stack during time-travel.
+
+# 1.5.5
+- Fixed an 'Unverified breakpoint' issue for z88dk. (See #38)
+
+# 1.5.4
+- Fixed #34: Unverified breakpoints in version 1.5.3. Windows 10
+
+# 1.5.3
+- Merged into master branch.
+- Updated 'whatsnew'.
+
+# 1.5.2
+- Relaunch: the memory view of the first session is now correctly closed before re-launching.
+- Commands: "-view" is now working with all commands.
+- Commands:
+	- Renamed: "md" changed to "mv".
+	- "md" used to do a memory dump to console.
+	- "ms" used to save memory contents to a file.
+
+# 1.5.1
+- Packaged for beta testing.
+
+# 1.5.0
+- New architecture for parsing list files. This will make it easier to add parsing for a new assembler.
+- Changes to launch.json:
+	- "listFiles" removed.
+	- Instead a configuration for each assembler: "sjasmplus", "z80asm" and "z88dk" added with overworked parameters.
+	- "excludeFiles" parameter added to allow excluding certain files from association with execution addresses.
+	- "filter" regex deprecated (i.e. it will not be supported anymore in future versions of DeZog).
+	- "disassemblerArgs"/"numberOfLines": New parameter to control the number of displayed disassembled lines.
+- z88dk:
+	- Renamed "z88dkMapFile" to "mapFile".
+	- "addOffset" removed for z88dk. Use "mapFile" instead.
+	- "mapFile" is mandatory now.
+- Byte registers IXL, IXH, IYL and IYH now show additionally under "Registers 2"
+- Bugfix for a hang when Disassembly should wrap around 0xFFFF.
+- Fixed an "Unverified breakpoint" issue on Windows.
+
+# 1.4.9
+- Fixed issue #29: Zsim: load instruction not executed properly for addresses between 0x0000 and 0x3FFF
+
 # 1.4.8
 - Fixed white spaces in loading for zrcp (ZEsarUX).
 
@@ -49,7 +132,7 @@
 # 1.2.8
 - skipInterrupt setting moved to zrcp.
 - cspect:
-  - warning if codeCoverabeEnabled==true.
+  - warning if codeCoverageEnabled==true.
   - error if Z80 unit tests are started with cspect.
 - Fixed ZEsarUX Z80 unit tests.
 - Fix for cspect HL', I, R and IM registers.
@@ -80,7 +163,7 @@
 - Fixed: Update of word register in case of byte register change (and vice versa).
 
 # 1.2.3
-- Fixed: crash when switching form ZEsarUX to CSpect.
+- Fixed: crash when switching from ZEsarUX to CSpect.
 - Manual change of PC (or SP) will update the shown file.
 - zsim: cpu writing to ROM does not change the contents anymore.
 - zsim: simulator exchanged. Is less buggy and 30% performance increase.
@@ -207,7 +290,7 @@
 # 0.12.1
 - Added simulator remoteType: 'zxsim'.
 - Changed remoteType 'zxnext' to 'serial'.
-- Ssimulation of ZX Spectrum keys.
+- Simulation of ZX Spectrum keys.
 
 # 0.12.0
 - Changed remoteType 'zesarux' to 'zrcp'.
@@ -345,7 +428,7 @@
 - Fixed hovering on IXL, IXH, IYL and IYH
 - Renamed "resetOnStart" to "resetOnLaunch"
 - New launch.json option "commandsAfterLaunch" to execute certain emulator commands right after the program-to-debug has been loaded.
-- Changed 'Restart' behaviour to overcome hang on restart.
+- Changed 'Restart' behavior to overcome hang on restart.
 
 ## 0.5.0
 - Uses new (ZEsarUX 7.1) and fast memory breakpoints for WPMEM watchpoints, see https://github.com/maziac/z80-debug/blob/master/documentation/Usage.md#wpmem
@@ -379,7 +462,7 @@
 ## 0.2.0
 - WPMEM: Persistent memory watchpoints added.
 - Watches: now the size and type can be manually added.
-- A memory viewer/editory has been added.
+- A memory viewer/editor has been added.
 - console command to evaluate expressions/labels.
 
 ## 0.1.2

@@ -1,5 +1,5 @@
 import * as fs from 'fs';
-import {RemoteBase, RemoteBreakpoint, BREAK_REASON_NUMBER, MemoryBank} from '../remotebase';
+import {RemoteBase, RemoteBreakpoint, BREAK_REASON_NUMBER} from '../remotebase';
 import {GenericWatchpoint, GenericBreakpoint} from '../../genericwatchpoint';
 import {Z80RegistersClass, Z80_REG, Z80Registers} from '../z80registers';
 import {MemBank16k} from './membank16k';
@@ -8,17 +8,17 @@ import {NexFile} from './nexfile';
 import {Settings} from '../../settings';
 import {Utility} from '../../misc/utility';
 import * as path from 'path';
-import {Remote} from '../remotefactory';
 import {Labels} from '../../labels/labels';
-import {ZxMemory} from '../zxsimulator/zxmemory';
 import {gzip, ungzip} from 'node-gzip';
 import {TimeWait} from '../../misc/timewait';
 import {Log} from '../../log';
+import {Zx128MemoryModel, Zx48MemoryModel, ZxNextMemoryModel} from '../Paging/memorymodel';
+import {Z80RegistersStandardDecoder} from '../z80registersstandarddecoder';
 
 
 
 // The current implemented version of the protocol.
-export const DZRP_VERSION=[1, 6, 0];
+export const DZRP_VERSION=[2, 0, 0];
 
 // The program name and version transmitted during CMD_INIT.
 export const DZRP_PROGRAM_NAME="DeZog v"+process.version;
@@ -40,19 +40,18 @@ export enum DZRP {
 	CMD_PAUSE=7,
 	CMD_READ_MEM=8,
 	CMD_WRITE_MEM=9,
-	CMD_GET_SLOTS=10,
-	CMD_SET_SLOT=11,
-	CMD_GET_TBBLUE_REG=12,
-	CMD_SET_BORDER=13,
-	CMD_SET_BREAKPOINTS=14,
-	CMD_RESTORE_MEM=15,
-	CMD_LOOPBACK=16,
-	CMD_GET_SPRITES_PALETTE=17,
-	CMD_GET_SPRITES_CLIP_WINDOW_AND_CONTROL=18,
+	CMD_SET_SLOT=10,
+	CMD_GET_TBBLUE_REG=11,
+	CMD_SET_BORDER=12,
+	CMD_SET_BREAKPOINTS=13,
+	CMD_RESTORE_MEM=14,
+	CMD_LOOPBACK=15,
+	CMD_GET_SPRITES_PALETTE=16,
+	CMD_GET_SPRITES_CLIP_WINDOW_AND_CONTROL=17,
 
 	// Sprites
-	CMD_GET_SPRITES=19,
-	CMD_GET_SPRITE_PATTERNS=20,
+	CMD_GET_SPRITES=18,
+	CMD_GET_SPRITE_PATTERNS=19,
 
 	// Breakpoint
 	CMD_ADD_BREAKPOINT=40,
@@ -64,14 +63,14 @@ export enum DZRP {
 	// State
 	CMD_READ_STATE=50,
 	CMD_WRITE_STATE=51,
-};
+}
 
 /**
  * DZRP notifications.
  */
 export enum DZRP_NTF {
 	NTF_PAUSE=1
-};
+}
 
 
 /**
@@ -83,6 +82,18 @@ export enum AlternateCommand {
 	CONTINUE=0,   // I.e. no alternate command
 	STEP_OVER=1,
 	STEP_OUT=2
+}
+
+
+/**
+ * Defines the machine type that is returned in CMD_INIT.
+ * It is required to determine the memory model.
+ */
+export enum DzrpMachineType {
+	ZX16K = 1,
+	ZX48K = 2,
+	ZX128K = 3,
+	ZXNEXT = 4
 }
 
 
@@ -108,9 +119,8 @@ export class DzrpRemote extends RemoteBase {
 	// Object to allow to give time to vscode during long running 'steps'.
 	protected timeWait: TimeWait;
 
-	// A temporary array with the set breakpoints and conditions.
-	// Undefined=no breakpoint is set.
-	// The tmpBreakpoints are created out of the other breakpoints, assertBreakpoints and logpoints
+	// A temporary map with the set breakpoints and conditions.
+	// The tmpBreakpoints are created out of the other breakpoints, assertionBreakpoints and logpoints
 	// as soon as the z80CpuContinue is called.
 	// It allows access of the breakpoint by a simple call to one map only.
 	// It may happen seldom, but it can happen that 2 breakpoints share
@@ -122,6 +132,13 @@ export class DzrpRemote extends RemoteBase {
 	// If a breakpoint is set during the debugged program being run
 	// the tmpBreakpoints are updated.
 	protected tmpBreakpoints=new Map<number,Array<GenericBreakpoint>>();
+
+	// The watchpoints are collected here. These are all watchpoint set through setWatchpoint.
+	// If the user could set watchpoints also manually this would include all WPMEM watchpoints plus
+	// the user set watchpoints.
+	// Note: it could happen that several watchpoints are defined for the same
+	// address or that they overlap(they have size).
+	protected addedWatchpoints=new Set<GenericWatchpoint>();
 
 
 	/// Constructor.
@@ -161,16 +178,41 @@ export class DzrpRemote extends RemoteBase {
 			for (let loadObj of Settings.launch.loadObjs) {
 				if (loadObj.path) {
 					// Convert start address
-					const start=Labels.getNumberFromString(loadObj.start);
+					const start=Labels.getNumberFromString64k(loadObj.start);
 					if (isNaN(start))
 						throw Error("Cannot evaluate 'loadObjs[].start' ("+loadObj.start+").");
 					await this.loadObj(loadObj.path, start);
 				}
 			}
 
+
+			Z80Registers.decoder=new Z80RegistersStandardDecoder();
+			// Set memory model according machine type
+			switch (resp.machineType) {
+				case DzrpMachineType.ZX48K:
+					// ZX Spectrum 48K
+					this.memoryModel=new Zx48MemoryModel();
+					break;
+				case DzrpMachineType.ZX128K:
+					// ZX Spectrum 128K
+					this.memoryModel=new Zx128MemoryModel();
+					break;
+				case DzrpMachineType.ZXNEXT:
+					// ZxNext: 8x8k banks
+					this.memoryModel=new ZxNextMemoryModel();
+					break;
+				default:
+					// Error: Unknown type
+					throw Error("Unknown machine type "+resp.machineType+" received.");
+					break;
+			}
+			this.memoryModel.init();
+			Labels.convertLabelsTo(this.memoryModel);
+
+
 			// Set Program Counter to execAddress
 			if (Settings.launch.execAddress) {
-				const execAddress=Labels.getNumberFromString(Settings.launch.execAddress);
+				const execAddress=Labels.getNumberFromString64k(Settings.launch.execAddress);
 				if (isNaN(execAddress))
 					throw Error("Cannot evaluate 'execAddress' ("+Settings.launch.execAddress+").");
 				// Set PC
@@ -178,8 +220,7 @@ export class DzrpRemote extends RemoteBase {
 			}
 
 			// Get initial registers
-			Z80Registers.clearCache();
-			await this.getRegisters();
+			await this.getRegistersFromEmulator();
 
 			// Ready
 			const text="'"+resp.programName+"' initialized.";
@@ -203,17 +244,16 @@ export class DzrpRemote extends RemoteBase {
 
 
 	/**
-	* If cache is empty retrieves the registers from
-	* the Remote.
-	*/
-	public async getRegisters(): Promise<void> {
-		if (Z80Registers.valid())
-			return;
-
+	 * If cache is empty retrieves the registers from
+	 * the Remote.
+	 */
+	public async getRegistersFromEmulator(): Promise<void> {
+		Log.log('clearRegisters ->', Z80Registers.getCache() || "undefined");
 		// Get regs
-		const regs=await this.sendDzrpCmdGetRegisters();
+		const regs = await this.sendDzrpCmdGetRegisters();
 		// And set
 		Z80Registers.setCache(regs);
+		Log.log('clearRegisters <-', Z80Registers.getCache() || "undefined");
 	}
 
 
@@ -233,7 +273,7 @@ export class DzrpRemote extends RemoteBase {
 		let response="";
 		if (cmd_name=="cmd_init") {
 			const resp=await this.sendDzrpCmdInit();
-			response="Program: '" +resp.programName+"', DZRP Version: "+resp.dzrpVersion+", Error: "+resp.error;
+			response="Program: '"+resp.programName+"', DZRP Version: "+resp.dzrpVersion+"', machineType: "+resp.machineType+", Error: "+resp.error;
 		}
 		else if (cmd_name=="cmd_continue") {
 			await this.sendDzrpCmdContinue();
@@ -243,18 +283,25 @@ export class DzrpRemote extends RemoteBase {
 		}
 		else if (cmd_name=="cmd_get_registers") {
 			const regs=await this.sendDzrpCmdGetRegisters();
+			// Registers
 			const regNames=["PC", "SP", "AF", "BC", "DE", "HL", "IX", "IY", "AF'", "BC'", "DE'", "HL'", "IR", "IM"];
 			let i=0;
 			for (const name of regNames) {
 				const value=regs[i];
 				response+="\n"+name+"("+i+"): 0x"+Utility.getHexString(value, 4)+"/"+value;
-				i++
+				i++;
 			}
+			// Slots
+			i++;	// Skip reserved
+			const slotCount=regs[i++];
+			response+='\nslots.length='+slotCount;
+			for (let k=0; k<slotCount; k++)
+				response+='\n slots['+k+']='+regs[k+i];
 		}
 		else if (cmd_name=="cmd_set_register") {
 			if (cmdArray.length<2) {
 				// Error
-				return "Expecting 2 parameters: regIndex and value.";
+				throw Error("Expecting 2 parameters: regIndex and value.");
 			}
 			const regIndex=Utility.parseValue(cmdArray[0]);
 			const value=Utility.parseValue(cmdArray[1]);
@@ -263,7 +310,7 @@ export class DzrpRemote extends RemoteBase {
 		else if (cmd_name=="cmd_write_bank") {
 			if (cmdArray.length<1) {
 				// Error
-				return "Expecting 1 parameter: 8k bank number [0-223].";
+				throw Error("Expecting 1 parameter: 8k bank number [0-223].");
 			}
 			const bank=Utility.parseValue(cmdArray[0]);
 			// Create test data
@@ -275,20 +322,20 @@ export class DzrpRemote extends RemoteBase {
 		else if (cmd_name=="cmd_read_mem") {
 			if (cmdArray.length<2) {
 				// Error
-				return "Expecting at least 2 parameters: address and count.";
+				throw Error("Expecting at least 2 parameters: address and count.");
 			}
 			const addr=Utility.parseValue(cmdArray[0]);
 			const count=Utility.parseValue(cmdArray[1]);
 			const data=await this.sendDzrpCmdReadMem(addr, count);
 			// Print
-			response=Utility.getHexString(addr,4)+"h: ";
+			response=Utility.getHexString(addr, 4)+"h: ";
 			for (let i=0; i<data.length; i++)
 				response+=Utility.getHexString(data[i], 2)+"h ";
 		}
 		else if (cmd_name=="cmd_write_mem") {
 			if (cmdArray.length<2) {
 				// Error
-				return "Expecting at least 2 parameters: address and memory content list.";
+				throw Error("Expecting at least 2 parameters: address and memory content list.");
 			}
 			const addr=Utility.parseValue(cmdArray.shift()!);
 			// Create test data
@@ -298,16 +345,10 @@ export class DzrpRemote extends RemoteBase {
 				data[i]=Utility.parseValue(cmdArray[i])&0xFF;
 			await this.sendDzrpCmdWriteMem(addr, data);
 		}
-		else if (cmd_name=="cmd_get_slots") {
-			const slots=await this.sendDzrpCmdGetSlots();
-			// Print
-			for (let i=0; i<slots.length; i++)
-				response+="\nSlot["+i+"]: 8k bank "+slots[i];
-		}
 		else if (cmd_name=="cmd_set_slot") {
 			if (cmdArray.length!=2) {
 				// Error
-				return "Expecting 2 parameters: slot and bank.";
+				throw Error("Expecting 2 parameters: slot and bank.");
 			}
 			const slot=Utility.parseValue(cmdArray[0]);
 			const bank=Utility.parseValue(cmdArray[1]);
@@ -316,7 +357,7 @@ export class DzrpRemote extends RemoteBase {
 		else if (cmd_name=="cmd_get_tbblue_reg") {
 			if (cmdArray.length<1) {
 				// Error
-				return "Expecting 1 parameter: register.";
+				throw Error("Expecting 1 parameter: register.");
 			}
 			const reg=Utility.parseValue(cmdArray[0]);
 			const value=await this.sendDzrpCmdGetTbblueReg(reg);
@@ -325,7 +366,7 @@ export class DzrpRemote extends RemoteBase {
 		else if (cmd_name=="cmd_get_sprites_palette") {
 			if (cmdArray.length<1) {
 				// Error
-				return "Expecting 1 parameter: palette number (0 or 1).";
+				throw Error("Expecting 1 parameter: palette number (0 or 1).");
 			}
 			const paletteNumber=Utility.parseValue(cmdArray[0]);
 			const palette=await this.sendDzrpCmdGetSpritesPalette(paletteNumber);
@@ -333,14 +374,67 @@ export class DzrpRemote extends RemoteBase {
 			for (let i=0; i<palette.length; i++)
 				response+=Utility.getHexString(palette[i], 3)+" ";
 		}
-		// TODO: Add missing ones: CMD_SET_BREAKPOINTS, CMD_RESTORE_MEM
 		else if (cmd_name=="cmd_get_sprites_clip_window_and_control") {
 			const clip=await this.sendDzrpCmdGetSpritesClipWindow();
 			response+="xl="+clip.xl+", xr="+clip.xr+", yt="+clip.yt+", yb="+clip.yb+", control="+Utility.getBitsString(clip.control, 8);
 		}
 		else if (cmd_name=="cmd_set_breakpoints") {
+			// Note: This command supports only the setting of 1 breakpoint:
+			// "cmd_set_breakpoints address bank"
+			if (cmdArray.length!=2) {
+				// Error
+				throw Error("Expecting 2 parameters: address and bank.");
+			}
+			const address=Utility.parseValue(cmdArray[0]);
+			const bank=Utility.parseValue(cmdArray[1]);
+			// Create data to send
+			const longAddress=address+((bank+1)<<16);
+			const memValues=await this.sendDzrpCmdSetBreakpoints([longAddress]);
+			const value=memValues[0];
+			response+='\n Response: 0x'+Utility.getHexString(value, 2)+'/'+value;
 		}
 		else if (cmd_name=="cmd_restore_mem") {
+			// Note: This command supports only the restoring of 1 breakpoint:
+			// "cmd_restore_mem address bank value"
+			if (cmdArray.length!=3) {
+				// Error
+				throw Error("Expecting 3 parameters: address, bank and value.");
+			}
+			const address=Utility.parseValue(cmdArray[0]);
+			const bank=Utility.parseValue(cmdArray[1]);
+			const value=Utility.parseValue(cmdArray[2]);
+			// Create data to send
+			const longAddress=address+((bank+1)<<16);
+			await this.sendDzrpCmdRestoreMem([{address: longAddress, value}]);
+		}
+		else if (cmd_name=="cmd_add_breakpoint") {
+			// "cmd_add_breakpoint address bank"
+			if (cmdArray.length!=2) {
+				// Error
+				throw Error("Expecting 2 parameters: address and bank.");
+			}
+			const address=Utility.parseValue(cmdArray[0]);
+			const bank=Utility.parseValue(cmdArray[1]);
+			// Create data to send
+			const longAddress=address+((bank+1)<<16);
+			const bp: GenericBreakpoint={
+				address: longAddress
+			};
+			await this.sendDzrpCmdAddBreakpoint(bp);
+			response+='\n Breakpoint ID: '+bp.bpId;
+		}
+		else if (cmd_name=="cmd_remove_breakpoint") {
+			// "cmd_remove_breakpoint breakpointId"
+			if (cmdArray.length!=1) {
+				// Error
+				throw Error("Expecting 1 parameter: breakpoint ID.");
+			}
+			const bp: GenericBreakpoint={
+				address: -1,	// not used
+				bpId: Utility.parseValue(cmdArray[0])
+			};
+			// Create data to send
+			await this.sendDzrpCmdRemoveBreakpoint(bp);
 		}
 
 		/*
@@ -363,7 +457,7 @@ export class DzrpRemote extends RemoteBase {
 		}
 		*/
 		else {
-			return "Error: not supported.";
+			throw Error("Error: not supported.");
 		}
 
 		// Return string
@@ -390,8 +484,7 @@ export class DzrpRemote extends RemoteBase {
 		// Send command to set register
 		await this.sendDzrpCmdSetRegister(index, value);
 		// Send command to get registers
-		Z80Registers.clearCache();
-		await this.getRegisters();
+		await this.getRegistersFromEmulator(); // Not necessary: this.clearRegsAndSlots();
 		// Return
 		const realValue=Z80Registers.getRegValueByName(register);
 		return realValue;
@@ -399,7 +492,52 @@ export class DzrpRemote extends RemoteBase {
 
 
 	/**
-	 * Searches the 'breakpoints', the 'assertBreakpoints' and the
+	 * Sets the slot to a specific bank.
+	 * Used by the unit tests.
+	 * @param slot The slot to set.
+	 * @param bank The bank for the slot.
+	 */
+	public async setSlot(slotIndex: number, bank: number): Promise<void> {
+		await this.sendDzrpCmdSetSlot(slotIndex, bank);
+	}
+
+
+	/**
+	 * Returns the array of watchpoint for a given address.
+	 * Normally the array is empty or contains only 1 watchpoint.
+	 * But it could happen that several watchpoints are defined for the same address.
+	 * @param The address to check. Could be a long address.
+	 * @return An array with all corresponding watchpoints. Usually only 1 or an empty array.
+	 */
+	protected getWatchpointsByAddress(address: number): Array<GenericWatchpoint> {
+		const address64=address&0xFFFF;
+		const arr=new Array<GenericWatchpoint>();
+		const slots=this.getSlots()!;
+		for (const wp of this.addedWatchpoints) {
+			// Check if address falls in range
+			const addr=wp.address;
+			const addr64=addr&0xFFFF;
+			if (address64<addr64||address64>=addr64+wp.size)	// Note: wrap around is ignored
+				continue;
+
+			// Check if wp start address is currently paged in
+			const bank=Z80Registers.getBankFromAddress(addr);
+			if (bank>=0) {
+				const slotNr=Z80Registers.getSlotFromAddress(addr);
+				const slotBank=slots[slotNr];
+				if (bank!=slotBank)
+					continue;	// Wrong bank -> Next
+			}
+
+			// WP fits
+			arr.push(wp);
+		}
+		return arr;
+	}
+
+
+	/**
+	 * Searches the 'breakpoints', the 'assertionBreakpoints' and the
 	 * 'logpoints' arrays for the given breakpoint ID.
 	 * In fact searches tmpBreakpoints. Therefore make sure you called
 	 * createTemporaryBreakpoints before.
@@ -414,12 +552,8 @@ export class DzrpRemote extends RemoteBase {
 	}
 
 	/**
-	 * Creates a temporary array from the given array.
-	 * The structure is more performant for use in a
-	 * loop:
-	 * The array contains 65536 entries, i.e. addresses. If no BP
-	 * is set for an address the entry is undefined.
-	 * If one is set the entry contains a pointer to the breakpoint.
+	 * Creates a temporary map from the breakpoints, logpoints and assertions.
+	 * If one entry is set the entry contains a pointer to the breakpoint.
 	 * Or better it contains an array of breakpoints that all share the
 	 * same address.
 	 * Note: normally this array contains only one entry.
@@ -430,9 +564,9 @@ export class DzrpRemote extends RemoteBase {
 		tmpBps.clear()
 		// Get all breakpoints from the enabled logpoints
 		const enabledLogPoints=this.getEnabledLogpoints();
-		// Assert breakpoints
-		const assertBps=(this.assertBreakpointsEnabled)? this.assertBreakpoints:[];
-		const allBps=[...this.breakpoints, ...enabledLogPoints, ...assertBps];
+		// Assertion breakpoints
+		const assertionBps=(this.assertionBreakpointsEnabled)? this.assertionBreakpoints:[];
+		const allBps=[...this.breakpoints, ...enabledLogPoints, ...assertionBps];
 		allBps.forEach(bp => {
 			this.addTmpBreakpoint(bp);
 		});
@@ -450,7 +584,7 @@ export class DzrpRemote extends RemoteBase {
 		let bpInner=tmpBps.get(bpAddress);
 		if (!bpInner) {
 			// Create new array
-			bpInner=new Array<GenericBreakpoint>();
+			bpInner = new Array<GenericBreakpoint>();
 			tmpBps.set(bp.address, bpInner);
 		}
 		bpInner.push(bp);
@@ -499,10 +633,17 @@ export class DzrpRemote extends RemoteBase {
 		if (bp) {
 			if (bp.condition) {
 				// Check if condition is true
-				// TODO: If I would allow 'await evalExpression' I could also allow e.g. memory checks
-				const evalCond=Utility.evalExpression(bp.condition, true);
-				if (evalCond!=0)
-					return {condition: bp.condition, log: bp.log};
+				// REMARK: If I would allow 'await evalExpression' I could also allow e.g. memory checks
+				try {
+					const evalCond = Utility.evalExpression(bp.condition, true);
+					if (evalCond != 0)
+						return {condition: bp.condition, log: bp.log};
+				}
+				catch (e) {
+					// Extend message
+					e.message = "Evaluation condition '" + bp.condition + "': " + (e.message || "Unknown error");
+					throw e;
+				}
 				return {condition: undefined, log: bp.log};
 			}
 			else {
@@ -540,32 +681,42 @@ export class DzrpRemote extends RemoteBase {
 				reasonString="Manual break.";
 				break;
 			case BREAK_REASON_NUMBER.BREAKPOINT_HIT:
-				// Check if it was an ASSERT.
-				const abps=this.assertBreakpoints.filter(abp => abp.address==breakAddress);
+				// Check if it was an ASSERTION.
+				const abps=this.assertionBreakpoints.filter(abp => abp.address==breakAddress);
 				for (const abp of abps) {
 					if (condition==abp.condition) {
-						const assertCond=Utility.getAssertFromCondition(condition);
-						reasonString="Assertion failed: "+assertCond;
+						const assertionCond=Utility.getAssertionFromCondition(condition);
+						//reasonString = "Assertion failed: " + assertionCond;
+						const replaced = Utility.replaceVarsWithValues(assertionCond);
+						reasonString = "Assertion failed: " + replaced;
 						return reasonString;
 					}
 				}
 				// Or breakpoint
-				if (reasonString==undefined) {
-					reasonString="Breakpoint hit @"+Utility.getHexString(breakAddress, 4)+"h.";
-					if (condition)
-						reasonString+=" Condition: "+condition;
-				}
+				const addrString=Utility.getHexString(breakAddress&0xFFFF, 4);
+				let bankString="";
+				const bank=breakAddress>>>16;
+				if (bank!=0)
+					bankString=" (bank="+(bank-1).toString()+")";
+				//this.getSlotFromAddress(breakAddress);
+				reasonString="Breakpoint hit @"+addrString+"h"+bankString+".";
+				if (condition)
+					reasonString+=" Condition: "+condition;
 				return reasonString;
 
 			case BREAK_REASON_NUMBER.WATCHPOINT_READ:
 			case BREAK_REASON_NUMBER.WATCHPOINT_WRITE:
 				// Watchpoint
 				const address=breakAddress;
-				const labels=Labels.getLabelsForNumber(address);
-				labels.push(address.toString());	// as decimal number
-				const labelsString=labels.join(', ');
-				reasonString="Watchpoint "+((breakNumber==BREAK_REASON_NUMBER.WATCHPOINT_READ)? "read":"write")+" access at address 0x"+Utility.getHexString(address, 4)+" ("+labelsString+"). "+breakReasonString;
+				reasonString="Watchpoint "+((breakNumber==BREAK_REASON_NUMBER.WATCHPOINT_READ)? "read":"write")+" access at address 0x"+Utility.getLongAddressString(address);
+				const labels = Labels.getLabelsPlusIndexForNumber64k(address);
+				if (labels.length > 0) {
+					const labelsString=labels.join(', ');
+					reasonString+=" ("+labelsString+")";
+				}
+				reasonString+=". "+breakReasonString;
 				break;
+
 			default:
 				reasonString=breakReasonString;
 		}
@@ -605,7 +756,7 @@ export class DzrpRemote extends RemoteBase {
 	 * @returns undefined or the condition text.
 	 * If the breakpoint condition is not true: undefined is returned.
 	 * If the condition is true:
-	 * - If a log is present the logtext is evaluated and a 'log' with the text will be emitted. 'undefined' is returned.
+	 * - If a log is present the logtext is evaluated and a 'debug_console' with the text will be emitted. 'undefined' is returned.
 	 * - If no log is present the condition text is returned.
 	 * All in all:
 	 * If undefined is returned no break should be done.
@@ -616,46 +767,62 @@ export class DzrpRemote extends RemoteBase {
 	 * might be turned into a BREAKPOINT_HIT.
 	 */
 	protected async evalBpConditionAndLog(breakNumber: number, breakAddress: number): Promise<{condition: string|undefined, correctedBreakNumber: number}> {
-		// Get registers
-		//Z80Registers.clearCache();
-		//await Remote.getRegisters();
-
 		// Check breakReason, i.e. check if it was a watchpoint.
 		let condition;
 		let correctedBreakNumber=breakNumber;
 		switch (breakNumber) {
 			case BREAK_REASON_NUMBER.WATCHPOINT_READ:
 			case BREAK_REASON_NUMBER.WATCHPOINT_WRITE:
-				// TODO: evaluate condition
-				// Condition not used at the moment
-				condition='';
+				// Check if watchpoint really exists, i.e. it could be that a watchpoint for a wrong bank was hit.
+				// If no watchpointis found condition stays undefined.
+				const wps=this.getWatchpointsByAddress(breakAddress);
+				for (const wp of wps) {
+					let found=false;
+					if (breakNumber==BREAK_REASON_NUMBER.WATCHPOINT_READ) {
+						found=wp.access.includes('r');
+					}
+					else {
+						// WATCHPOINT_WRITE
+						found=wp.access.includes('w');
+					}
+					if (found) {
+						// REMARK: evaluate condition
+						// Condition not used at the moment
+						condition='';
+						break;
+					}
+				}
 				break;
 
 			case BREAK_REASON_NUMBER.NO_REASON:
 			case BREAK_REASON_NUMBER.BREAKPOINT_HIT:
 				// Get corresponding breakpoint
 				const bps=this.getBreakpointsByAddress(breakAddress);
+				// Note: If breakAddress is not found (e.g. break in wrong bank) then bps is empty.
+				// This results in condition being undefined on return which in turn
+				// results in another continue.
 
-				// Loop over all matching breakpoints (normally only one)
+				// Loop over all matching breakpoints (normally only one, but could be 2 or more. E.g. if manual BP is at the same point as a LOGPOINT)
 				for (const bp of bps) {
 					// Check for condition
-					const {condition: cond, log}=this.checkConditionAndLog(bp);
-					condition=cond;
+					let {condition: cond, log}=this.checkConditionAndLog(bp);
+					//condition=cond;
 
 					// Emit log?
-					if (condition!=undefined&&log) {
+					if (cond!=undefined&&log) {
 						// Convert
 						const evalLog=await Utility.evalLogString(log);
 						// Print
-						this.emit('log', evalLog);
+						this.emit('debug_console', "Log: "+evalLog);
 						// Don't eval condition again
-						condition=undefined;
+						cond=undefined;
 					}
 
-					if (condition!=undefined) {
+					if (cond!=undefined) {
 						// At least one break condition found
+						condition=cond;
 						correctedBreakNumber=BREAK_REASON_NUMBER.BREAKPOINT_HIT;
-						break;
+						//break;
 					}
 				}
 
@@ -703,8 +870,7 @@ export class DzrpRemote extends RemoteBase {
 					await this.timeWait.waitAtInterval();
 
 					// Get registers
-					Z80Registers.clearCache();
-					await Remote.getRegisters();
+					await this.getRegistersFromEmulator();
 
 					// Check for break condition
 					const {condition, correctedBreakNumber}=await this.evalBpConditionAndLog(breakNumber, breakAddress);
@@ -713,30 +879,30 @@ export class DzrpRemote extends RemoteBase {
 					if (condition==undefined) {
 						// Continue
 						this.continueResolve=funcContinueResolve;
-						this.sendDzrpCmdContinue();
+						await this.sendDzrpCmdContinue();
 					}
 					else {
 						// Construct break reason string to report
 						breakReasonString=await this.constructBreakReasonString(correctedBreakNumber, breakAddress, condition, breakReasonString);
 						// Clear registers
-						Z80Registers.clearCache();
-						this.clearCallStack();
+						await this.getRegistersFromEmulator();
+						await this.getCallStackFromEmulator();
 						// return
 						resolve(breakReasonString);
 					}
 				}
 				catch (e) {
 					// Clear registers
-					Z80Registers.clearCache();
-					this.clearCallStack();
-					const reason: string=e;
+					await this.getRegistersFromEmulator();
+					await this.getCallStackFromEmulator();
+					const reason: string=e.message;
 					resolve(reason);
 				}
 			};
 
 			// Send 'run' command
 			this.continueResolve=funcContinueResolve;
-			this.sendDzrpCmdContinue();
+			await this.sendDzrpCmdContinue();
 		});
 	}
 
@@ -755,20 +921,18 @@ export class DzrpRemote extends RemoteBase {
 	/**
 	 * 'step over' an instruction in the debugger.
 	 * @param stepOver true=step-over, false=step-into.
-	 * @returns A Promise with:
-	 * 'instruction' is the disassembly of the current line.
-	 * 'breakReasonString' a possibly text with the break reason.
+	 * @returns A Promise with a string with the break reason.
+	 * Or 'undefined' if no reason.
 	 */
-	public async stepOver(stepOver = true): Promise<{instruction: string, breakReasonString?: string}> {
-		return new Promise<{instruction: string, breakReasonString?: string}>(async resolve => {
+	public async stepOver(stepOver = true): Promise<string|undefined> {
+		return new Promise<string|undefined>(async resolve => {
 			// Prepare for break: This function is called by the PAUSE (break) notification:
 			const funcContinueResolve=async ({breakNumber, breakAddress, breakReasonString}) => {
 				// Give vscode a little time
 				await this.timeWait.waitAtInterval();
 
 				// Get registers
-				Z80Registers.clearCache();
-				await Remote.getRegisters();
+				await this.getRegistersFromEmulator();
 
 				// Check for break condition
 				let {condition, correctedBreakNumber}=await this.evalBpConditionAndLog(breakNumber, breakAddress);
@@ -776,28 +940,26 @@ export class DzrpRemote extends RemoteBase {
 				// Check for continue
 				if (condition==undefined) {
 					// Calculate the breakpoints to use for step-over/step-into
-					let [, bp1, bp2]=await this.calcStepBp(stepOver);
+				//	[, bp1, bp2]=await this.calcStepBp(stepOver);
+					// Note: we need to use the original bp addresses
 					// Continue
 					this.continueResolve=funcContinueResolve;
-					this.sendDzrpCmdContinue(bp1, bp2);
+					await this.sendDzrpCmdContinue(bp1, bp2);
 				}
 				else {
 					// Construct break reason string to report
 					breakReasonString=await this.constructBreakReasonString(correctedBreakNumber, breakAddress, condition, breakReasonString);
 					// Clear registers
-					this.clearCallStack();
+					await this.getCallStackFromEmulator();
 					// return
-					resolve({instruction, breakReasonString});
+					resolve(breakReasonString);
 				}
 			};
 
 			// Calculate the breakpoints to use for step-over
-			await this.getRegisters();
-			let [opcode, bp1, bp2]=await this.calcStepBp(stepOver);
-			// Disassemble
-			const pc=this.getPC();
-			const opCodeDescription=opcode.disassemble();
-			const instruction=Utility.getHexString(pc, 4)+' '+opCodeDescription.mnemonic;
+			//await this.getRegisters();
+			let [, bp1, bp2]=await this.calcStepBp(stepOver);
+			//this.emit('debug_console', instruction);
 			// Send 'run' command
 			this.continueResolve=funcContinueResolve;
 			// Send command to 'continue'
@@ -808,13 +970,10 @@ export class DzrpRemote extends RemoteBase {
 
 	/**
 	 * 'step into' an instruction in the debugger.
-	 * @returns A Promise:
-	 * 'instruction' is the disassembly of the current line.
-	 * 'breakReasonString' a possibly text with the break reason. This is mainly to keep the
-	 * record consistent with stepOver. But it is e.g. used to inform when the
-	 * end of the cpu history is reached.
+	 * @returns A Promise with a string with the break reason.
+	 * Or 'undefined' if no reason.
 	 */
-	public async stepInto(): Promise<{instruction: string, breakReasonString?: string}> {
+	public async stepInto(): Promise<string|undefined> {
 		return this.stepOver(false);
 	}
 
@@ -826,8 +985,8 @@ export class DzrpRemote extends RemoteBase {
 	 * the stackpointer is bigger than at the beginning.
 	 * @returns A Promise with a string containing the break reason.
 	 */
-	public async stepOut(): Promise<string> {
-		return new Promise<string>(async resolve => {
+	public async stepOut(): Promise<string | undefined> {
+		return new Promise<string | undefined>(async resolve => {
 			// Get current SP
 			const startSp=Z80Registers.getRegValue(Z80_REG.SP);
 			let prevSp=startSp;
@@ -840,8 +999,7 @@ export class DzrpRemote extends RemoteBase {
 					await this.timeWait.waitAtInterval();
 
 					// Get registers
-					Z80Registers.clearCache();
-					await Remote.getRegisters();
+					await this.getRegistersFromEmulator();
 
 					// Check for break condition
 					let {condition, correctedBreakNumber}=await this.evalBpConditionAndLog(breakNumber, breakAddress);
@@ -871,22 +1029,22 @@ export class DzrpRemote extends RemoteBase {
 						// Continue
 						this.continueResolve=funcContinueResolve;
 						prevPc=Z80Registers.getPC();
-						this.sendDzrpCmdContinue(bp1, bp2);
+						await this.sendDzrpCmdContinue(bp1, bp2);
 					}
 					else {
 						// Construct break reason string to report
 						breakReasonString=await this.constructBreakReasonString(correctedBreakNumber, breakAddress, condition, breakReasonString);
 						// Clear registers
-						Z80Registers.clearCache();
-						this.clearCallStack();
+						await this.getRegistersFromEmulator();
+						await this.getCallStackFromEmulator();
 						// return
 						resolve(breakReasonString);
 					}
 				}
 				catch (e) {
 					// Clear registers
-					Z80Registers.clearCache();
-					this.clearCallStack();
+					await this.getRegistersFromEmulator();
+					await this.getCallStackFromEmulator();
 					const reason: string=e;
 					resolve(reason);
 				}
@@ -897,7 +1055,7 @@ export class DzrpRemote extends RemoteBase {
 			// Send 'run' command
 			this.continueResolve=funcContinueResolve;
 			prevPc=Z80Registers.getPC();
-			this.sendDzrpCmdContinue(bp1, bp2);
+			await this.sendDzrpCmdContinue(bp1, bp2);
 		});
 	}
 
@@ -939,7 +1097,11 @@ export class DzrpRemote extends RemoteBase {
 	 * @param wp The watchpoint to set. Will set 'bpId' in the 'watchPoint'.
 	 */
 	public async setWatchpoint(wp: GenericWatchpoint): Promise<void> {
-		await this.sendDzrpCmdAddWatchpoint(wp.address, wp.size, wp.access, wp.condition);
+		// Remember watchpoint
+		this.addedWatchpoints.add(wp);
+
+		// Forward request
+		await this.sendDzrpCmdAddWatchpoint(wp.address, wp.size, wp.access);
 	}
 
 
@@ -949,20 +1111,24 @@ export class DzrpRemote extends RemoteBase {
 	 * @param wp The watchpoint to renove. Will set 'bpId' in the 'watchPoint' to undefined.
 	 */
 	public async removeWatchpoint(wp: GenericWatchpoint): Promise<void> {
-		await this.sendDzrpCmdRemoveWatchpoint(wp.address, wp.size);
+		// Forget watchpoint
+		this.addedWatchpoints.delete(wp);
+
+		// Forward request
+		await this.sendDzrpCmdRemoveWatchpoint(wp.address, wp.size, wp.access);
 	}
 
 
 	/**
-	 * Enables/disables all assert breakpoints set from the sources.
+	 * Enables/disables all assertion breakpoints set from the sources.
 	 * @param enable true=enable, false=disable.
 	 */
-	public async enableAssertBreakpoints(enable: boolean): Promise<void> {
-		for (let abp of this.assertBreakpoints) {
+	public async enableAssertionBreakpoints(enable: boolean): Promise<void> {
+		for (let abp of this.assertionBreakpoints) {
 			if (enable) {
 				// Set breakpoint
 				if (!abp.bpId) {
-					await this.sendDzrpCmdAddBreakpoint(abp);
+					await this.sendDzrpCmdAddBreakpoint(abp);	// Sets sbp.bpId
 				}
 			}
 			else {
@@ -973,7 +1139,7 @@ export class DzrpRemote extends RemoteBase {
 				}
 			}
 		}
-		this.assertBreakpointsEnabled=enable;
+		this.assertionBreakpointsEnabled=enable;
 	}
 
 
@@ -1082,29 +1248,6 @@ export class DzrpRemote extends RemoteBase {
 
 
 	/**
-	 * Reads the memory pages, i.e. the slot/banks relationship from zesarux
-	 * and converts it to an array of MemoryBanks.
-	 * @returns A Promise with an array with the available memory pages.
-	 */
-	public async getMemoryBanks(): Promise<MemoryBank[]> {
-		// Prepare array
-		const pages: Array<MemoryBank>=[];
-		// Get the data
-		const data=await this.sendDzrpCmdGetSlots();
-		// Save in array
-		let start=0x0000;
-		data.map(slot => {
-			const end=start+ZxMemory.MEMORY_BANK_SIZE-1;
-			const name=(slot>=254)? "ROM":"BANK"+slot;
-			pages.push({start, end, name});
-			start+=ZxMemory.MEMORY_BANK_SIZE;
-		});
-		// Return
-		return pages;
-	}
-
-
-	/**
 	 * Loads .nex or .sna files.
 	 */
 	protected async loadBin(filePath: string): Promise<void> {
@@ -1119,8 +1262,8 @@ export class DzrpRemote extends RemoteBase {
 			throw Error("File extension not supported in '"+filePath+"' with remoteType:'"+Settings.launch.remoteType+"'. Can only load .sna and .nex files.");
 		}
 		// Make sure that the registers are reloaded
-		Z80Registers.clearCache();
-		this.clearCallStack();
+		//await this.getRegistersFromEmulator();
+		//await this.getCallStackFromEmulator();
 	}
 
 
@@ -1137,8 +1280,8 @@ export class DzrpRemote extends RemoteBase {
 		await this.sendDzrpCmdWriteMem(startAddress, objBuffer);
 
 		// Make sure that the registers are reloaded
-		Z80Registers.clearCache();
-		this.clearCallStack();
+		//await this.getRegistersFromEmulator();
+		//await this.getCallStackFromEmulator();
 	}
 
 
@@ -1156,7 +1299,7 @@ export class DzrpRemote extends RemoteBase {
 
 		// Transfer 16k memory banks
 		for (const memBank of snaFile.memBanks) {
-			// As 2x 8k memory banks
+			// As 2x 8k memory banks. I.e. DZRP is for ZX Next only.
 			const bank8=2*memBank.bank;
 			await this.sendDzrpCmdWriteBank(bank8, memBank.data.slice(0, MemBank16k.BANK16K_SIZE/2));
 			await this.sendDzrpCmdWriteBank(bank8+1, memBank.data.slice(MemBank16k.BANK16K_SIZE/2));
@@ -1252,8 +1395,8 @@ export class DzrpRemote extends RemoteBase {
 		// Restore data
 		await this.sendDzrpCmdWriteState(stateData);
 		// Clear register cache
-		Z80Registers.clearCache();
-		this.clearCallStack();
+		await this.getRegistersFromEmulator();
+		await this.getCallStackFromEmulator();
 	}
 
 
@@ -1285,7 +1428,7 @@ export class DzrpRemote extends RemoteBase {
 
 	/**
 	 * Retrieves the sprites clipping window from the emulator.
-	 * @returns A Promise that returns the clipping dimensions and teh control byte(xl, xr, yt, yb, control).
+	 * @returns A Promise that returns the clipping dimensions and the control byte(xl, xr, yt, yb, control).
 	 */
 	public async getTbblueSpritesClippingWindow(): Promise<{xl: number, xr: number, yt: number, yb: number, control: number}> {
 		const clip=await this.sendDzrpCmdGetSpritesClipWindow();
@@ -1325,13 +1468,13 @@ export class DzrpRemote extends RemoteBase {
 	/**
 	 * Override.
 	 * The first command send. Includes the version number.
-	 * @returns The error, program name (incl. version) and dzrp version.
+	 * @returns The error, program name (incl. version), dzrp version and the machine type.
 	 * error is 0 on success. 0xFF if version numbers not match.
 	 * Other numbers indicate an error on remote side.
 	 */
-	protected async sendDzrpCmdInit(): Promise<{error: string|undefined, programName: string, dzrpVersion: string}> {
+	protected async sendDzrpCmdInit(): Promise<{error: string|undefined, programName: string, dzrpVersion: string, machineType: DzrpMachineType}> {
 		Utility.assert(false);
-		return {error: undefined, dzrpVersion: "", programName: ""};
+		return {error: undefined, dzrpVersion: "", programName: "", machineType:0};
 	}
 
 
@@ -1370,8 +1513,8 @@ export class DzrpRemote extends RemoteBase {
 	/**
 	 * Override.
 	 * Sends the command to continue ('run') the program.
-	 * @param bp1Address The address of breakpoint 1 or undefined if not used.
-	 * @param bp2Address The address of breakpoint 2 or undefined if not used.
+	 * @param bp1Address The 64k address (not long address) of breakpoint 1 or undefined if not used.
+	 * @param bp2Address The 64k address (not long address) of breakpoint 2 or undefined if not used.
 	 */
 	protected async sendDzrpCmdContinue(bp1Address?: number, bp2Address?: number): Promise<void> {
 		Utility.assert(false);
@@ -1404,7 +1547,6 @@ export class DzrpRemote extends RemoteBase {
 	 * @param bp The breakpoint to remove.
 	 */
 	protected async sendDzrpCmdRemoveBreakpoint(bp: GenericBreakpoint): Promise<void> {
-
 		Utility.assert(false);
 	}
 
@@ -1412,14 +1554,11 @@ export class DzrpRemote extends RemoteBase {
 	/**
 	 * Override.
 	 * Sends the command to add a watchpoint.
-	 * @param address The watchpoint address. 0x0000-0xFFFF.
+	 * @param address The watchpoint long address.
 	 * @param size The size of the watchpoint. address+size-1 is the last address for the watchpoint.
-	 * I.e. you can watch whole memory areas.
-	 * @param access Read "r" or write "w" access, or both "rw".
-	 * @param condition The watchpoint condition as string. If there is n0 condition
-	 * 'condition' may be undefined or an empty string ''.
+	 * @param access 'r', 'w' or 'rw'.
 	 */
-	protected async sendDzrpCmdAddWatchpoint(address: number, size: number, access: string, condition: string): Promise<void> {
+	protected async sendDzrpCmdAddWatchpoint(address: number, size: number, access: string): Promise<void> {
 		throw Error("Watchpoints not supported!");
 	}
 
@@ -1427,10 +1566,11 @@ export class DzrpRemote extends RemoteBase {
 	/**
 	 * Override.
 	 * Sends the command to remove a watchpoint for an address range.
-	 * @param address The watchpoint address. 0x0000-0xFFFF.
+	 * @param address The watchpoint long address.
 	 * @param size The size of the watchpoint. address+size-1 is the last address for the watchpoint.
+	 * @param access 'r', 'w' or 'rw'.
 	 */
-	protected async sendDzrpCmdRemoveWatchpoint(address: number, size: number): Promise<void> {
+	protected async sendDzrpCmdRemoveWatchpoint(address: number, size: number, access: string): Promise<void> {
 		throw Error("Watchpoints not supported!");
 	}
 
@@ -1464,21 +1604,10 @@ export class DzrpRemote extends RemoteBase {
 	 * Sends the command to write a memory bank.
 	 * @param bank 8k memory bank number.
 	 * @param dataArray The data to write.
+	 * @throws An exception if e.g. the bank size does not match.
  	*/
 	public async sendDzrpCmdWriteBank(bank: number, dataArray: Buffer|Uint8Array): Promise<void> {
 		Utility.assert(false);
-	}
-
-
-	/**
-	 * Override.
-	 * Sends the command to read the slot/bank associations (8k banks).
-	 * @returns A Promise with an number array of 8 slots.
-	 *  Each entry contains the correspondent bank number.
- 	*/
-	public async sendDzrpCmdGetSlots(): Promise<number[]> {
-		Utility.assert(false);
-		return [];
 	}
 
 
@@ -1585,5 +1714,31 @@ export class DzrpRemote extends RemoteBase {
 		Utility.assert(false);
 	}
 
+
+	/**
+	 * Sends the command to set all breakpoints.
+	 * For the ZXNext all breakpoints are set at once just before the
+	 * next 'continue' is executed.
+	 * @param bpAddresses The breakpoint addresses. Each 0x0000-0xFFFF.
+	 * @returns A Promise with the memory contents from each breakpoint address.
+	 */
+	protected async sendDzrpCmdSetBreakpoints(bpAddresses: Array<number>): Promise<Array<number>> {
+		Utility.assert(false);
+		return [];
+	}
+
+
+	/**
+	 * Sends the command to restore the memory for all breakpoints.
+	 * This is send just after the 'continue' command.
+	 * So that the user only sees correct memory contents even if doing
+	 * a disassembly or memory read.
+	 * It is also required otherwise the breakpoints in 'calcStep' are not correctly
+	 * calculated.
+	 * @param elems The addresses + memory content.
+	 */
+	protected async sendDzrpCmdRestoreMem(elems: Array<{address: number, value: number}>): Promise<void> {
+		Utility.assert(false);
+	}
 }
 

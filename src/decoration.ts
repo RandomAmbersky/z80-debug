@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { Labels, SourceFileEntry } from './labels/labels';
+//import {Log} from './log';
 //import { Settings } from './settings';
 import {Disassembly, DisassemblyClass} from './misc/disassembly';
 import {Utility} from './misc/utility';
@@ -306,7 +307,7 @@ export class DecorationClass {
 		if (fileMapName==this.COVERAGE) {
 			if (edFilename==DisassemblyClass.getAbsFilePath()) {
 				// Handle disassembly file
-				this.SetDisasmCoverageDecoration(editor);
+				this.setDisasmCoverageDecoration(editor);
 				return;	// Skip normal case
 			}
 		}
@@ -328,7 +329,7 @@ export class DecorationClass {
 	/**
 	 * Sets the decorations for the disassembler temp file.
 	 */
-	public SetDisasmCoverageDecoration(editor: vscode.TextEditor) {
+	public setDisasmCoverageDecoration(editor: vscode.TextEditor) {
 		// Coverage
 		const lines=Disassembly.getLinesForAddresses(this.unassignedCodeCoverageAddresses);
 		const decorations=lines.map(lineNr => new vscode.Range(lineNr, 0, lineNr, 1000));
@@ -371,7 +372,7 @@ export class DecorationClass {
 				fileMap.set(filename, lines);
 			}
 			const lineNr=location.lineNr;
-			// TODO: Could be optimized. Here it is possible that coverage for that line already exists and would then be added 2 or more times.
+			// REMARK: Could be optimized. Here it is possible that coverage for that line already exists and would then be added 2 or more times.
 			const range = new vscode.Range(lineNr,0, lineNr,1000);
 			// Add address to set
 			lines.push(range);
@@ -431,7 +432,7 @@ export class DecorationClass {
 	 * Is called when a new 'break' should be shown.
 	 * This happens during continue, continueReverse, stepOut, stepOver.
 	 * The break decoration is cleared before all those actions.
-	 * @param pc The address to decorate. Used to find teh source line.
+	 * @param pc The address to decorate. Used to find the source line.
 	 * @param text The text to show.
 	 */
 	public showBreak(pc: number, text: string) {
@@ -478,10 +479,15 @@ export class DecorationClass {
 	/**
 	 * Is called whenever the short history changes.
 	 * Will set the decoration.
+	 * @param startIndex
 	 * @param addresses The addresses to decorate. Is an ordered list.
 	 * The youngest address (instruction) is at index 0.
+	 * @param registers An array that correspondents to 'addresses' and
+	 * includes the values of the changed registers as text.
+	 * It is shown together with the index in the decoration.
+	 * Is undefined if 'spotShowRegisters' is false.
 	 */
-	public showHistorySpot(startIndex, addresses: Array<number>) {
+	public showHistorySpot(startIndex, addresses: Array<number>, registers: Array<string>) {
 		// Clear decorations
 		this.clearHistorySpot();
 
@@ -490,23 +496,28 @@ export class DecorationClass {
 		const fileMap = decoMap.fileMap;
 
 		// Check if addresses are used more than once
-		const addressMap = new Map<string, string>();
-		let index = -startIndex-1;
-		addresses.forEach(addr => {
+		const addressMap = new Map<string, {regText: string, indexText: string}>();
+		let index = -startIndex - 1;
+		addresses.forEach((addr, k) => {
 			const location = this.getFileAndLineForAddress(addr);
 			const locString = location.lineNr + ';' + location.fileName;
-			let text = addressMap.get(locString);
-			if(text)
-				text += "," + index.toString();
-			else
-				text = index.toString();
-			addressMap.set(locString, text);
+			let entry = addressMap.get(locString);
+			if (!entry) {
+				// Show registers only for the first entry
+				// Add changed registers
+				entry = {regText: registers[k] || '', indexText: index.toString()};
+				addressMap.set(locString, entry);
+			}
+			else {
+				// But show all indices
+				entry.indexText += ", " + index.toString();
+			}
 			// Next
-			index --;
+			index--;
 		});
 
 		// Loop over all addresses
-		for(const [locString, text] of addressMap) {
+		for(const [locString, entry] of addressMap) {
 			// Get file location for address
 			//const location = Labels.getFileAndLineForAddress(addr);
 			const k = locString.indexOf(';');
@@ -523,20 +534,28 @@ export class DecorationClass {
 			// Add address to set
 			const lineNr = parseInt(locString);
 			const deco = {
-				range: new vscode.Range(lineNr,0, lineNr,1000),
+				range: new vscode.Range(lineNr, 0, lineNr, 1000),
 				hoverMessage: undefined,
 				renderOptions: {
-				  //opacity: "0.5",
-				  after: {
-					  contentText: "[" + text + "]",
-					  margin: "2.5em",
-					  //height: "5px",
-					  //fontWeight: "4em",
-					  //width: "4em",
-					  //fontStyle: "italic",
-				  },
+					after: {
+						contentText: "[" + entry.indexText + "] " + entry.regText,
+						margin: "2.5em",
+						//height: "5px",
+						//fontWeight: "4em",
+						//width: "4em",
+						//fontStyle: "italic",
+					},
 				},
 			};
+			// If changes register is available:
+			/*
+			if (entry.regText) {
+				deco.renderOptions.before = {
+					contentText: "[" + entry.regText + "]",
+					margin: "2.5em",
+				};
+			}
+			*/
 
 			// Add address to set
 			lines.push(deco);

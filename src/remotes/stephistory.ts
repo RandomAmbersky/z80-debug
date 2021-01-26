@@ -17,7 +17,7 @@ import {Settings} from '../settings';
  * The step history contains only the instructions that one has stepped through
  * during debugging.
  * E.g. if you step over a CALL the step history includes only the instruction CALL.
- * The true cpu history, in contrast, would include all instruction from the subroutine
+ * The true cpu history, in contrast, would include all instructions from the subroutine
  * that was called.
  *
  * The step history has the advantage that it is available for all Remotes.
@@ -48,6 +48,9 @@ export class StepHistoryClass extends EventEmitter {
 	// The current history index.
 	protected historyIndex: number;
 
+	// A copy of the Z80Registers cache when the step-back started.
+	protected presentRegistersCache: any;
+
 	// The maximum size of the history array.
 	protected maxSize: number;
 
@@ -60,6 +63,16 @@ export class StepHistoryClass extends EventEmitter {
 
 	/// User pressed break (pause). Will interrupt e.g. continueReverse.
 	protected running: boolean;
+
+	// Mirror of the settings historySpotCount.
+	protected spotCount: number;
+
+	// Mirror of the settings spotShowRegisters.
+	protected spotShowRegisters: boolean;
+
+
+	// Prepare to get current registers.
+	protected wantedChangedRegs=["A", "F", "BC", "DE", "HL", "IX", "IY", "SP"];
 
 
 	// Constructor
@@ -76,7 +89,8 @@ export class StepHistoryClass extends EventEmitter {
 		this.history=new Array<HistoryInstructionInfo>();
 		this.historyIndex=-1;
 		this.revDbgHistory=new Array<number>();
-		this.liteCallStackHistory=new Array<RefList<CallStackFrame>>();
+		this.liteCallStackHistory=new Array<RefList<CallStackFrame>>(); this.spotCount=Settings.launch.history.spotCount;
+		this.spotShowRegisters=Settings.launch.history.spotShowRegisters;
 	}
 
 
@@ -102,10 +116,10 @@ export class StepHistoryClass extends EventEmitter {
 	 * Is async.
 	 * @returns The registers or undefined if at the end of the history.
 	 */
-	public async getPrevRegistersAsync(): Promise<HistoryInstructionInfo|undefined> {
-		const index=this.historyIndex+1;
+	public async getPrevRegistersAsync(): Promise<HistoryInstructionInfo | undefined> {
+		const index = this.historyIndex + 1;
 		//console.log("len=" + this.history.length + ", index=" + index);
-		Utility.assert(index>=0);
+		Utility.assert(index >= 0);
 		if (index>=this.history.length)
 			return undefined;
 		this.historyIndex=index;
@@ -141,20 +155,13 @@ export class StepHistoryClass extends EventEmitter {
 	/**
 	 * Pushes one history into the array.
 	 * @param line One line of history.
-	 * @param exchange true if the element should be exchanged rather than added.
 	 */
-	public pushHistoryInfo(line: HistoryInstructionInfo, exchange = false) {
+	public pushHistoryInfo(line: HistoryInstructionInfo) {
 		Utility.assert(line);
-		if (exchange&&this.history.length>0) {
-			// Exchange
-			this.history[0]=line;
-		}
-		else {
-			// Otherwise add
-			this.history.unshift(line);
-			if (this.history.length>this.maxSize)
-				this.history.pop();
-		}
+		// Otherwise add
+		this.history.unshift(line);
+		if (this.history.length>this.maxSize)
+			this.history.pop();
 	}
 
 
@@ -241,17 +248,151 @@ export class StepHistoryClass extends EventEmitter {
 
 
 	/**
+	 * Creates a string with changed registers (names+value).
+	 * @param line The history line in question.
+	 * @param regsMap A map of register names ("A", "F", "HL" etc.) with their
+	 * current values, i.e. the value after the history 'line'.
+	 * I.e. the value that will be printed if not equal to previous
+	 * value.
+	 * This function will also override the value with the value of history line.
+	 */
+	protected getChangedRegistersString(line: string, regsMap: Map<string, number>): string {
+		let regText='';
+		for (const [regName, prevValue] of regsMap) {
+			const regValue=Z80Registers.decoder.getRegValueByName(regName, line);
+			// Check if changed
+			if (regValue!=prevValue) {
+				let regName2='';
+				let regValueString='';
+				// Check for flags
+				const size=regName.length;
+				if (size==1) {
+					regName2=regName;
+					if (regName=='F') {
+						// Convert register
+						regValueString=Utility.getFlagsString(regValue);
+					}
+					else {
+						// One byte register
+						regValueString=Utility.getHexString(regValue, 2)+'h';
+					}
+				}
+				else {
+					// Distinguishes one and two byte registers
+					// Normal reg
+					// Check which part of the (double) register has changed
+					if (regName.startsWith('I') || regName=='SP' || regName=='PC') {
+						// Double register
+						regName2 = regName;
+						regValueString = Utility.getHexString(regValue, 4);
+					}
+					else {
+						// Check both parts
+						const valueXored = regValue ^ prevValue;
+						// First part
+						if (valueXored & 0xFF00) {
+							regName2 += regName[0];
+							regValueString += Utility.getHexString(regValue >>> 8, 2);
+						}
+						// Second part
+						if (valueXored & 0xFF) {
+							regName2 += regName[1];
+							regValueString += Utility.getHexString(regValue & 0xFF, 2);
+						}
+					}
+
+					// Only 2 byte registers/ Double register
+					//regName2=regName;
+					//regValueString=Utility.getHexString(regValue, 4);
+					regValueString+='h';
+				}
+
+				// Construct text
+				if (regText)
+					regText+=' ';
+				regText+=regName2+'='+regValueString;
+				// Store previous value
+				regsMap.set(regName, regValue);
+			}
+		}
+		// Return
+		return regText;
+	}
+
+
+	/**
+	 * Calculates the indices into the history array.
+	 * For simple history arrays this is equal to the index range.
+	 * For zsim this is more complex.
+	 * Note: The current register values in Z80Registers need to be uptodate, i.e. Remote.getRegisters has to be
+	 * called somewhere before.
+	 * @param indices The correctly ordered indices into this.history.
+	 * @returns addresses and registers to pass to the decorations.
+	 */
+	protected calcSpotHistoryAddressesAndRegisters(indices: Array<number>): {addresses: Array<number>, registers: Array<string>} {
+		// Changed registers
+		let registers;
+		let regsMap;
+		if (this.spotShowRegisters) {
+			// Prepare arrays
+			registers=new Array<string>();
+			regsMap=new Map<string, number>();
+		}
+
+		// Now go through all indices
+		// Note: The decoration shows the (changed) register value, **prior** to the instruction in that line.
+		const addresses=new Array<number>();
+		for (let i=indices.length-1; i>=0; i--) {
+			const index=indices[i];
+			const line=this.history[index];
+			// Get address
+			const pc=Z80Registers.decoder.parsePCLong(line);
+			//addresses.push(pc);
+			addresses.unshift(pc);
+			// Compare registers
+			if (registers) {
+				if (i==indices.length-1) {
+					// Not for the first line
+					//registers.unshift('');
+					// Preset register values
+					this.wantedChangedRegs.forEach(regName => {
+						const value=Z80Registers.decoder.getRegValueByName(regName, line);
+						regsMap.set(regName, value);
+					});
+				}
+				else {
+					// But for all others
+					const regText=this.getChangedRegistersString(line, regsMap);
+					registers.unshift(regText);
+				}
+			}
+		}
+		// Now for the current line
+		let currentRegs;
+		if (this.isInStepBackMode())
+			currentRegs = this.presentRegistersCache;	// Use stored one
+		else
+			currentRegs = Z80Registers.getCache();	// Or the current one, if nothing stored
+		const regText = this.getChangedRegistersString(currentRegs, regsMap);
+		registers.unshift(regText);
+
+		// Return
+		return {addresses, registers};
+	}
+
+
+	/**
 	 * Emits 'historySpot' to signal that the files should be decorated.
 	 * It can happen that this method has to retrieve data from the
 	 * remote.
 	 */
 	protected emitHistorySpot() {
 		// Check if history spot is enabled
-		const count=Settings.launch.history.spotCount;
+		const count=this.spotCount;
 		if (count<=0)
 			return;
 
-		// Otherwise calculate addresses
+		// Otherwise calculate indices into the history
 
 		// Get start index
 		let index=this.historyIndex+1;
@@ -259,18 +400,21 @@ export class StepHistoryClass extends EventEmitter {
 		if (startIndex<0)
 			startIndex=0;
 
-		const addresses=new Array<number>();
 		let end=index+count;
 		if (end>this.history.length)
 			end=this.history.length;
-		for (let i=startIndex; i<end; i++) {
-			const line=this.history[i];
-			const pc=this.decoder.parsePC(line);
-			addresses.push(pc);
+		// Loop through history
+		const indices=new Array<number>();
+		let i;
+		for (i=startIndex; i<end; i++) {
+			indices.push(i);
 		}
 
+		// Changed registers and addresses
+		const {addresses, registers}=this.calcSpotHistoryAddressesAndRegisters(indices);
+
 		// Emit code coverage event
-		this.emit('historySpot', startIndex, addresses);
+		this.emit('historySpot', startIndex, addresses, registers);
 	}
 
 
@@ -291,7 +435,17 @@ export class StepHistoryClass extends EventEmitter {
 	protected checkPcBreakpoints(): string|undefined {
 		Utility.assert(Z80Registers.getCache());
 		let condition;
-		const pc=Z80Registers.getPC();
+
+		// We use the callstack to get the PC long address.
+		// The Z80Register contains only the 64k address but the callstack
+		// contains the PC as well. If long addresses are used the callstack
+		// PC is coded as long address.
+		//const pc=Z80Registers.getPC();  This was used earlier.
+		const callStack=this.getCallStack();
+		const len=callStack.length;
+		Utility.assert(len>0);
+		const pc=callStack[len-1].addr;
+
 		const breakpoints=Remote.getBreakpointsArray();
 		for (const bp of breakpoints) {
 			if (bp.address==pc) {
@@ -322,7 +476,14 @@ export class StepHistoryClass extends EventEmitter {
 		// Text
 		let reason;
 		if (condition!=undefined) {
-			reason='Breakpoint hit at PC='+Utility.getHexString(pc, 4)+'h';
+			const breakAddress=pc;
+			const addrString=Utility.getHexString(breakAddress&0xFFFF, 4);
+			let bankString="";
+			const bank=breakAddress>>>16;
+			if (bank!=0)
+				bankString=" (bank="+(bank-1).toString()+")";
+			reason="Breakpoint hit @"+addrString+"h"+bankString;
+			//reason='Breakpoint hit at PC='+Utility.getHexString(pc&0xFFFF, 4)+'h';
 			if (condition!="")
 				reason+=', '+condition;
 		}
@@ -335,12 +496,16 @@ export class StepHistoryClass extends EventEmitter {
 	 * If at end it returns undefined.
 	 */
 	public async revDbgPrev(): Promise<HistoryInstructionInfo|undefined> {
-		const line=await this.getPrevRegistersAsync();
+		if (!this.isInStepBackMode()) {
+			// Store current registers
+			this.presentRegistersCache = Z80Registers.getCache();
+		}
+		const line = await this.getPrevRegistersAsync();
 		if (line) {
 			// Add to register cache
 			Z80Registers.setCache(line);
 			// Add to history for decoration
-			const addr=Z80Registers.getPC();
+			const addr=Z80Registers.getPCLong();
 			this.revDbgHistory.push(addr);
 		}
 		return line;
@@ -349,13 +514,18 @@ export class StepHistoryClass extends EventEmitter {
 
 	/**
 	 * @returns Returns the next line in the cpu history.
-	 * If at start it returns ''.
+	 * If at start it returns undefined.
 	 * Note: Doesn't need to be async. I.e. doesn't need to communicate with the external remote.
 	 */
 	public revDbgNext(): HistoryInstructionInfo|undefined {
 		// Get line
-		let line=this.getNextRegisters() as string;
-		Z80Registers.setCache(line);
+		let line = this.getNextRegisters() as string;
+		if (line)
+			Z80Registers.setCache(line);
+		else {
+			// At the start set Z80 registers back with their real value.
+			Z80Registers.setCache(this.presentRegistersCache);
+		}
 		// Remove one address from history
 		this.revDbgHistory.pop();
 		return line;
@@ -368,7 +538,7 @@ export class StepHistoryClass extends EventEmitter {
 	 * or the start of the instruction is encountered.
 	 * @returns breakReason=A possibly break reason (e.g. 'Reached start of instruction history') or undefined.
 	 */
-	public continue(): string|undefined {
+	public async continue(): Promise<string|undefined> {
 		this.running=true;
 		// Continue in reverse debugging
 		// Will run until after the first of the instruction history
@@ -401,13 +571,13 @@ export class StepHistoryClass extends EventEmitter {
 			}
 		}
 		catch (e) {
-			breakReasonString='Error occurred: '+e;
+			breakReasonString='Error occurred: '+e.message;
 		}
 
 		// Return if next line is available, i.e. as long as we did not reach the start.
 		if (!nextLine) {
-			// Get the registers etc. from ZEsarUX
-			Z80Registers.clearCache();
+			// Get the registers etc. from the Remote
+			await Remote.getRegistersFromEmulator();
 			breakReasonString='Break: Reached start of instruction history.';
 		}
 
@@ -444,7 +614,7 @@ export class StepHistoryClass extends EventEmitter {
 			}
 		}
 		catch (e) {
-			breakReasonString='Error occurred: '+e;
+			breakReasonString='Error occurred: '+e.message;
 		}
 
 		return breakReasonString;
@@ -452,38 +622,42 @@ export class StepHistoryClass extends EventEmitter {
 
 
 	/**
-	 * Steps over an instruction.
-	 * Simply returns the next address line.
-	 * @returns instruction=undefined
-	 * breakReasonString=A possibly break reason (e.g. 'Reached start of instruction history') or undefined.
+	 * Should return the current instruction.
+	 * For the Lite StepHistory always returns undefined.
+	 * @returns undefined.
 	 */
-	public stepOver(): {instruction: string, breakReasonString: string|undefined} {
+	public getCurrentInstruction(): string|undefined {
+		return undefined;
+	}
+
+
+	/**
+	 * Steps over an instruction.
+	 * @returns A possibly break reason (e.g. 'Reached start of instruction history') or undefined if no break.
+	 */
+	public async stepOver(): Promise<string|undefined> {
 		let breakReasonString;
 		try {
 			const currentLine=this.revDbgNext();
 			if (!currentLine)
-				throw 'Break: Reached start of instruction history.';
+				throw Error('Break: Reached start of instruction history.');
 		}
 		catch (e) {
-			breakReasonString=e;
+			breakReasonString=e.message;
 		}
 
 		// Call handler
-		return {instruction: undefined as any, breakReasonString};
+		return breakReasonString;
 	}
 
 
 	/**
 	 * Steps into an instruction.
 	 * Is not implemented for StepHistory, only for CpuHistory.
-	 * @returns instruction=undefined
-	 * breakReasonString='Not supported in lite reverse debugging.'.
+	 * @returns The break reason/error: 'Step-into not supported in lite reverse debugging.'
 	 */
-	public stepInto(): {instruction: string, breakReasonString: string|undefined} {
-		return {
-			instruction: undefined as any,
-			breakReasonString: 'Step-into not supported in lite reverse debugging.'
-		};
+	public async stepInto(): Promise<string|undefined> {
+		return 'Step-into not supported in lite reverse debugging.';
 	}
 
 
@@ -492,30 +666,28 @@ export class StepHistoryClass extends EventEmitter {
 	 * Is not implemented for StepHistory, only for CpuHistory.
 	 * @returns breakReason='Not supported in lite reverse debugging.'.
 	 */
-	public stepOut(): string|undefined {
+	public async stepOut(): Promise<string | undefined> {
 		return 'Step-out not supported in lite reverse debugging.';
 	}
 
 
 	/**
 	  * 'step backwards' the program execution in the debugger.
-	  * @returns {instruction, breakReason} Promise.
-	  * instruction: e.g. "081C NOP"
-	  * breakReasonString: If not undefined it holds the break reason message.
+	  * @returns A Promise with a string with the break reason. Or undefined, if no break reason.
 	  */
-	public async stepBack(): Promise<{instruction: string, breakReasonString: string|undefined}> {
+	public async stepBack(): Promise<string|undefined> {
 		let breakReasonString;
 		try {
 			const currentLine=await this.revDbgPrev();
 			if (!currentLine)
 				throw Error('Break: Reached end of instruction history.');
-			}
+		}
 		catch (e) {
-			breakReasonString=e;
+			breakReasonString=e.message;
 		}
 
 		// Call handler
-		return {instruction: undefined as any, breakReasonString};
+		return breakReasonString;
 	}
 
 

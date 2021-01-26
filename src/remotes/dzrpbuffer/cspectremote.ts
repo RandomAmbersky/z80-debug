@@ -2,6 +2,7 @@ import {LogSocket} from '../../log';
 import {DzrpBufferRemote, CONNECTION_TIMEOUT} from './dzrpbufferremote';
 import {Socket} from 'net';
 import {Settings} from '../../settings';
+import {DzrpMachineType} from '../dzrp/dzrpremote';
 //import {Utility} from '../../misc/utility';
 
 
@@ -45,7 +46,7 @@ export class CSpectRemote extends DzrpBufferRemote {
 		this.socket.on('connect', async () => {
 			LogSocket.log('CSpectRemote: Connected to server!');
 
-			this.receivedData=new Buffer(0);
+			this.receivedData=Buffer.alloc(0);
 			this.expectedLength=4;	// for length
 			this.receivingHeader=true;
 			this.stopChunkTimeout();
@@ -97,7 +98,7 @@ export class CSpectRemote extends DzrpBufferRemote {
 		return new Promise<void>(resolve => {
 			this.socket.removeAllListeners();
 			// Timeout is required because socket.end() does not call the
-			// callback it it is already closed and teh state cannot
+			// callback it it is already closed and the state cannot
 			// reliable be determined.
 			const timeout = setTimeout(() => {
 				if (resolve) {
@@ -137,7 +138,7 @@ export class CSpectRemote extends DzrpBufferRemote {
 	 * There is a problem in CSpect: If a read-breakpoint is set it
 	 * can happen that the PC is not incremented anymore or that the
 	 * ISR routine is entered for every instruction. It's not on Mike's priority list, so I disable them here.
-	 * TODO: Enable CSpect watchpoints when problem is solved in CSpect.
+	 * REMARK: Enable CSpect watchpoints when problem is solved in CSpect.
 	 */
 	public async enableWPMEM(enable: boolean): Promise<void> {
 		throw Error("There is no support for watchpoints for CSpect.");
@@ -157,11 +158,11 @@ export class CSpectRemote extends DzrpBufferRemote {
 
 	/**
 	 * Returns a better error in case of CSpect plugin incompability.
-	 * @returns The error, program name (incl. version) and dzrp version.
+	 * @returns The error, program name (incl. version), dzrp version and the machine type.
 	 * error is 0 on success. 0xFF if version numbers not match.
 	 * Other numbers indicate an error on remote side.
 	 */
-	protected async sendDzrpCmdInit(): Promise<{error: string|undefined, programName: string, dzrpVersion: string}> {
+	protected async sendDzrpCmdInit(): Promise<{error: string|undefined, programName: string, dzrpVersion: string, machineType: DzrpMachineType}> {
 		const result=await super.sendDzrpCmdInit();
 		if (result.error) {
 			// An error occured. Add some help.
@@ -170,4 +171,20 @@ export class CSpectRemote extends DzrpBufferRemote {
 		return result;
 	}
 
+
+
+	/**
+	 * Not used/supported.
+	 */
+	protected async sendDzrpCmdSetBreakpoints(bpAddresses: Array<number>): Promise<Array<number>> {
+		throw Error("'sendDzrpCmdSetBreakpoints' is not implemented.'");
+	}
+
+
+	/**
+	 * Not used/supported.
+	 */
+	protected async sendDzrpCmdRestoreMem(elems: Array<{address: number, value: number}>): Promise<void> {
+		throw Error("'sendDzrpCmdRestoreMem' is not implemented.");
+	}
 }

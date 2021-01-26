@@ -4,36 +4,46 @@ import { DebugSessionClass } from './debugadapter';
 import { Z80UnitTests } from './z80unittests';
 import * as Net from 'net';
 import { DecorationClass, Decoration } from './decoration';
-import { LogSocket, Log } from './log';
-import Lg = require("./log")
+import {LogSocket, LogCustomCode, LogSocketCommands, Log } from './log';
 import {Utility} from './misc/utility';
 import {WhatsNewContentProvider} from './whatsnew/whatsnewprovider';
 import {DezogWhatsNewMgr} from './whatsnew/dezogwhatsnewmanager';
+import {HelpView} from './help/helpview';
 
 
 /// Config section in the settings.
-const CONFIG_SECTION = 'dezog';
+const CONFIG_SECTION='dezog';
+
 
 /**
- * Register configuration provider and command palette commands.
+ * 'activate' is called when one of the package.json activationEvents
+ * fires the first time.
+ * Afterwards it is not called anymore.
+ * 'deactivate' is called when vscode is terminated.
+ * I.e. the activationEvents just distribute the calling of the extensions
+ * little bit. Instead one could as well use "*", i.e. activate on all events.
+ *
+ * Registers configuration provider and command palette commands.
  * @param context
  */
 export function activate(context: vscode.ExtensionContext) {
+	//console.log("Extension ACTIVATED");
 
 	// Register the "Whatsnew" provider
 	const whatsnewProvider=new WhatsNewContentProvider();
 	const viewer=new DezogWhatsNewMgr(context);
 	viewer.registerContentProvider("dezog", whatsnewProvider);
 	// Show the page (if necessary)
-	if (viewer.checkIfVersionDiffers()) {
-		setTimeout(() => {
-			// Show after 1 s, so that it is shown above other stuff
-			viewer.showPage();
-		}, 1000);
+	const differs=viewer.checkIfVersionDiffers();
+	if(differs)
+	{
+		viewer.showPage();
 	}
 	// Register the additional command to view the "Whats' New" page.
 	context.subscriptions.push(vscode.commands.registerCommand("dezog.whatsNew", () => viewer.showPage()));
 
+	// Command to show the DeZog Help
+	context.subscriptions.push(vscode.commands.registerCommand('dezog.help', () => new HelpView()));
 
 	// Get and store the extension's path
 	const extPath=vscode.extensions.getExtension("maziac.dezog")?.extensionPath as string;
@@ -43,9 +53,8 @@ export function activate(context: vscode.ExtensionContext) {
 	configureLogging();
 	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
 		if (event.affectsConfiguration(CONFIG_SECTION + '.logpanel')
-			|| event.affectsConfiguration(CONFIG_SECTION + '.logfile')
-			|| event.affectsConfiguration(CONFIG_SECTION + '.socket.logpanel')
-			|| event.affectsConfiguration(CONFIG_SECTION+'.socket.logfile')) {
+			||event.affectsConfiguration(CONFIG_SECTION+'.socket.logpanel')
+			||event.affectsConfiguration(CONFIG_SECTION+'.customcode.logpanel')) {
 			configureLogging();
 		}
 	}));
@@ -57,6 +66,7 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(vscode.debug.onDidTerminateDebugSession(s => {
 		console.log(`terminated: ${s.type} ${s.name}`);
 	}));
+
 
 	// Command to change the program counter via menu.
 	context.subscriptions.push(vscode.commands.registerCommand('dezog.movePCtoCursor', () => {
@@ -106,7 +116,7 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 		catch (e) {
 			// Return empty list in case no unit tests are configured.
-			//vscode.window.showErrorMessage(e); // This is not an error!
+			//vscode.window.showErrorMessage(e.message); Don't show an error, otherwise it would be shown everytime that no configuration is found.
 			return [];
 		}
 	}));
@@ -137,10 +147,39 @@ export function activate(context: vscode.ExtensionContext) {
 		return Z80UnitTests.cmdCancelAllUnitTests();
 	}));
 
-	// Register a configuration provider for 'zrcp' debug type
-	const configProvider = new ZesaruxConfigurationProvider()
+	// Register a configuration provider for 'dezog' debug type
+	const configProvider = new DeZogConfigurationProvider()
 	context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('dezog', configProvider));
 	context.subscriptions.push(configProvider);
+
+	/*
+	Actually this did not work very well for other reasons:
+	It's better to retrieve the file/lineNr from the PC value.
+	Therefore I removed this.
+	// Register an evaluation provider for hovering.
+	// Note: Function is only called in debug context and only for the file currently being debugged.
+	// Therefore '' is enough.
+	vscode.languages.registerEvaluatableExpressionProvider('*', {
+		provideEvaluatableExpression(
+			document: vscode.TextDocument,
+			position: vscode.Position
+		): vscode.ProviderResult<vscode.EvaluatableExpression> {
+			const wordRange = document.getWordRangeAtPosition(position, /[\w\.]+/);
+			if (wordRange) {
+				const filePath = document.fileName;
+				if (filePath) {
+					const text = document.getText(wordRange);
+					// Put additionally text file path and position into 'expression',
+					// Format: "word:filePath:line:column"
+					// Example: "data_b60:/Volumes/SDDPCIE2TB/Projects/Z80/asm/z80-sld/main.asm:28:12
+					const expression = text + ':' + filePath + ':' + position.line + ':' + position.character;
+					return new vscode.EvaluatableExpression(wordRange, expression);
+				}
+			}
+			return undefined; // Nothing found
+		}
+	});
+	*/
 
 	// Initialize the Coverage singleton.
 	DecorationClass.Initialize(context);
@@ -149,9 +188,10 @@ export function activate(context: vscode.ExtensionContext) {
 
 
 /**
- * Called to deactivate the debug session.
+ * 'deactivate' is only called when vscode is terminated.
  */
 export function deactivate() {
+	//console.log("Extension DEACTIVATED");
 }
 
 
@@ -159,12 +199,12 @@ export function deactivate() {
  * Instantiates the ZesaruxDebugAdapter and sets up the
  * socket connection to it.
  */
-class ZesaruxConfigurationProvider implements vscode.DebugConfigurationProvider {
+class DeZogConfigurationProvider implements vscode.DebugConfigurationProvider {
 
 	private _server?: Net.Server;
 
 	/**
-	* Instantiates the ZesaruxDebugAdapter and sets up the
+	* Instantiates DebugAdapter (DebugSessionClass) and sets up the
  	* soccket connection to it.
  	*/
 	resolveDebugConfiguration(folder: WorkspaceFolder | undefined, config: DebugConfiguration, token?: CancellationToken): ProviderResult<DebugConfiguration> {
@@ -200,34 +240,39 @@ class ZesaruxConfigurationProvider implements vscode.DebugConfigurationProvider 
 
 
 /**
- * Configures teh logging from the settings.
+ * Configures the logging from the settings.
  */
 function configureLogging() {
-	const configuration = vscode.workspace.getConfiguration(CONFIG_SECTION, null);
+	const configuration=vscode.workspace.getConfiguration(CONFIG_SECTION, null);
 
 	// Global log
 	{
-		const logToPanel = configuration.get<boolean>('logpanel');
-		const filepath = configuration.get<string>('logfile');
-		const channelName = (logToPanel) ? "DeZog" : undefined;
-		const channelOut = (channelName) ? vscode.window.createOutputChannel(channelName) : undefined;
-		Log.init(channelOut, filepath);
+		const logToPanel=configuration.get<boolean>('logpanel');
+		const channelName=(logToPanel)? "DeZog":undefined;
+		const channelOut=(channelName)? vscode.window.createOutputChannel(channelName):undefined;
+		Log.init(channelOut);
+	}
+
+	// Custom code log
+	{
+		const logToPanel=configuration.get<boolean>('customcode.logpanel');
+		const channelName=(logToPanel)? "DeZog Custom Code":undefined;
+		const channelOut=(channelName)? vscode.window.createOutputChannel(channelName):undefined;
+		LogCustomCode.init(channelOut);
 	}
 
 	// Socket log
 	{
-		const logToPanel = configuration.get<boolean>('socket.logpanel');
-		const filepath = configuration.get<string>('socket.logfile');
-		const channelName = (logToPanel) ? "DeZog Socket" : undefined;
-		const channelOut = (channelName) ? vscode.window.createOutputChannel(channelName) : undefined;
-		LogSocket.init(channelOut, filepath);
+		const logToPanel=configuration.get<boolean>('socket.logpanel');
+		const channelName=(logToPanel)? "DeZog Socket":undefined;
+		const channelOut=(channelName)? vscode.window.createOutputChannel(channelName):undefined;
+		LogSocket.init(channelOut);
 	}
 
 	// Enable to get a log of the commands only
-	if(false) {
-		const channelOut = vscode.window.createOutputChannel("DeZog Socket Commands");
-		Lg.LogSocketCommands = new Log();
-		Lg.LogSocketCommands.init(channelOut, undefined);
+	if (false) {
+		const channelOut=vscode.window.createOutputChannel("DeZog Socket Commands");
+		LogSocketCommands.init(channelOut, undefined);
 	}
-
 }
+

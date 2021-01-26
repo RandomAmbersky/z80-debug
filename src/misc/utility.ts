@@ -3,9 +3,8 @@ import { Settings } from '../settings';
 import { Z80RegistersClass } from '../remotes/z80registers';
 import { Remote } from '../remotes/remotefactory';
 import * as fs from 'fs';
-import * as path from 'path';
+import {UnifiedPath} from './unifiedpath';
 import {Log} from '../log';
-
 
 
 /**
@@ -43,15 +42,28 @@ export class Utility {
 	 * @returns E.g. "AF" or "0BC8"
 	 */
 	public static getHexString(value: number|undefined, size: number): string {
-		if(value != undefined) {
-			var s = value.toString(16);
-			const r = size - s.length;
-			if(r < 0)
-				return s.substr(-r);	// remove leading digits
-			return "0".repeat(r) + s.toUpperCase();
+		if (value!=undefined) {
+			const s=value.toString(16).toUpperCase().padStart(size,'0');
+			return s;
 		}
 		// Undefined
 		return "?".repeat(size);
+	}
+
+
+	/**
+	 * Returns a hex string from a long address the string is in the format.
+	 * "F7A4h @bank5" for a long address and
+	 * "F7A4h" for a 64k address.
+	 * @param value The number to convert
+	 * @returns E.g. "F7A4h @bank5" or "F7A4h"
+	 */
+	public static getLongAddressString(value: number): string {
+		let addrString=this.getHexString(value&0xFFFF, 4)+'h';
+		const bank=value>>>16;
+		if (bank>0)
+			addrString+=" @bank"+(bank-1);
+		return addrString;
 	}
 
 
@@ -61,7 +73,7 @@ export class Utility {
 	 * @param size The number of digits for the resulting string.
 	 */
 	public static getBitsString(value: number, size: number) {
-		var s = value.toString(2);
+		const s = value.toString(2);
 		return "0".repeat(size - s.length) + s;
 	}
 
@@ -109,13 +121,13 @@ export class Utility {
 		const gbit = match[9];	// b
 		const gbit_empty = match[10];	// should be empty
 
-		var gflags = match[12];	// _
+		let gflags = match[12];	// _
 		const gflags_empty = match[13];	// should be empty
 
 		const gdec = match[15];	// decimal
 		const gdec_empty = match[16];	// should be empty
 
-		var gchar = match[18];	// ASCII character
+		const gchar = match[18];	// ASCII character
 
 		// Hex
 		if(ghex) {
@@ -147,7 +159,7 @@ export class Utility {
 			if(gflags_empty)
 				return NaN;
 			gflags = gflags.toLowerCase()
-			var flags = 0;
+			let flags = 0;
 			if(gflags.includes('s')) flags |= 0x80;
 			if(gflags.includes('z')) flags |= 0x40;
 			if(gflags.includes('h')) flags |= 0x10;
@@ -170,27 +182,23 @@ export class Utility {
 
 
 	/**
-	 * Evaluates the given expression.
-	 * Also checks if there are elements to convert first, e.g. labels are converted
-	 * to numbers first.
-	 * Examples:
-	 * 2-5*3 => -13, -Dh
-	 * LBL_TEST+1 => 32769, 8001h
-	 * HL' != 1111h
+	 * Replaces all registers and labels with numbers.
+	 * Works in the 64k space only. I.e. long addresses are changed to 64k addresses.
+	 * Example:
+	 * "A == 7"  =>  "2 == 7"
 	 * @param expr The expression to evaluate. May contain math expressions and labels.
 	 * Also evaluates numbers in formats like '$4000', '2FACh', 100111b, 'G'.
 	 * @param evalRegisters If true then register names will also be evaluated.
 	 * @param modulePrefix An optional prefix to use for each label. (sjasmplus)
 	 * @param lastLabel An optional last label to use for local labels. (sjasmplus)
-	 * @returns The evaluated number. (If a boolean expression is evaluated a 1 is returned for true and a 0 for false)
-	 * @throws SyntaxError if 'eval' throws an error or if the label is not found.
+	 * @returns The 'expr' with all labels and registers replaced by numbers.
 	 */
-	public static evalExpression(expr: string, evalRegisters = true, modulePrefix?:string, lastLabel?: string): number {
-		const exprLabelled = expr.replace(/([\$][0-9a-fA-F]+|[a-fA-F0-9]+h|[0-9]+\S+|0x[a-fA-F0-9]+|[a-zA-Z_\.][a-zA-Z0-9_\.]*'?|'[\S ]+')/g, (match, p1) => {
+	public static replaceVarsWithValues(expr: string, evalRegisters = true, modulePrefix?: string, lastLabel?: string): string {
+		const exprLabelled = expr.replace(/(0x[a-fA-F0-9]+|[a-zA-Z_\.][a-zA-Z0-9_\.]*'?|'[\S ]+'[\$][0-9a-fA-F]+|[a-fA-F0-9]+h|[0-9]+\S+)/g, (match, p1) => {
 			let res;
-			if(evalRegisters) {
+			if (evalRegisters) {
 				// Check if it might be a register name.
-				if(Z80RegistersClass.isRegister(p1)) {
+				if (Z80RegistersClass.isRegister(p1)) {
 					// Note: this is called synchronously because the cached register is available.
 					// If (it should not but if) it would be called asynchronously the
 					// addressString would simply be not decoded.
@@ -200,37 +208,106 @@ export class Utility {
 					catch {};
 				}
 			}
-			if(isNaN(res)) {
+			if (isNaN(res)) {
 				// Assume it is a label or number
 				let lbl = p1;
+
 				// Local label?
-				if(lastLabel && lbl.startsWith('.')) {
+				if (lastLabel && lbl.startsWith('.')) {
 					lbl = lastLabel + lbl;
 				}
 				// module prefix?
-				if(modulePrefix) {
-					res = Labels.getNumberFromString(modulePrefix+lbl) || NaN;
+				if (modulePrefix) {
+					res = Labels.getNumberFromString64k(modulePrefix + lbl) || NaN;
 				}
 
-				if(isNaN(res)) {
+				if (isNaN(res)) {
 					// Check for "normal" label
-					res = Labels.getNumberFromString(lbl);
-					if(isNaN(res))
+					res = Labels.getNumberFromString64k(lbl);
+					if (isNaN(res))
 						res = p1;	// Return unchanged substring
 				}
 			}
 			return res.toString();
 		});
 
-		// Evaluate
-		const result = eval(exprLabelled);
+		// Return the expression with variables replaced by numbers
+		return exprLabelled;
+	}
 
-		// Check if boolean
-		if(typeof(result) == 'boolean')
-			return (result) ? 1 : 0;
+
+	/**
+	 * Evaluates all registers and labels in a string.
+	 * For parameters see replaceVarsWithValues.
+	 * Examples:
+	 * 2-5*3 => -13, -Dh
+	 * LBL_TEST+1 => 32769, 8001h
+	 * HL' != 1111h
+	 * @returns A number. In case of boolean: 0 or 1.
+	 * Throws an error if evaluation not possible.
+	  */
+	public static evalExpression(expr: string, evalRegisters = true, modulePrefix?: string, lastLabel?: string): number {
+		try {
+			// Get all labels and registers replaced with numbers
+			const exprLabelled = this.replaceVarsWithValues(expr, evalRegisters, modulePrefix, lastLabel);
+
+			// Evaluate
+			const result = eval(exprLabelled);
+
+			// Check if boolean
+			if (typeof (result) == 'boolean')
+				return (result) ? 1 : 0;
+
+			// Return normal number
+			return result;
+		}
+		catch (e) {
+			// Rethrow
+			throw Error("Error evaluating '"+expr+"': " + e.message);
+		}
+	}
+
+	/**
+	 * Evaluates all registers and labels in a string.
+	 * Also evaluates ${...}.
+	 * For parameters see replaceVarsWithValues.
+	 * Examples:
+	 * ${(HL)} == 5
+	 * @returns A number. In case of boolean: 0 or 1.
+	 * Throws an error if evaluation not possible.
+	  */
+	/*
+	public static async substCondition(expr: string): Promise<string> {
+		// Look for ${...} expressions
+		const exprSoph = await this.evalLogString(expr);
+
+		// Get all labels and simple register names replaced with numbers
+		const exprLabelled = this.replaceVarsWithValues(exprSoph);
 
 		// Return normal number
-		return result;
+		return exprLabelled;
+	}
+	*/
+
+	/**
+	 * Returns the full label form a label, lastLabel and modulePrefix info.
+	 * Is e.g. used on hovering to reconstruct a full label from a part of a label.
+	 * @param label The (found or main) label, e.g. "main.loop" or ".loop".
+	 * @param modulePrefix If defined a possible module (with dot), e.g. "module.".
+	 * @param lastLabel The last label found in the file, e.g. "main.loop". Will be added to the label,
+	 * if the label is a local label.
+	 * @returns A full label, e.g. "module.main.something.end".
+	 */
+	public static createFullLabel(label: string, modulePrefix?: string, lastLabel?: string): string {
+		// Local label?
+		if (lastLabel && label.startsWith('.')) {
+			label = lastLabel + label;
+		}
+		// Module prefix?
+		if (modulePrefix) {
+			label = modulePrefix + label;
+		}
+		return label;
 	}
 
 
@@ -251,7 +328,7 @@ export class Utility {
 	*/
 	public static async evalLogString(logString: string): Promise<string> {
 		// logString e.g. "${b@(HL):hex}"
-		await Remote.getRegisters();	// Make sure that registers are available.
+		//await Remote.getRegisters();	// Make sure that registers are available.
 
 		// Replace does not work asynchrounously, therefore we need to store the results in arrays.
 		const offsets: Array<number>=[];
@@ -344,8 +421,8 @@ export class Utility {
 		if(!format.includes('\t'))
 			return null;	// no tabs
 		// Replace every formatting with maximum size replacement
-		var result = format.replace(/\${([^}]*?:)?([^:]*?)(:[\s\S]*?)?}/g, (match, p1, p2, p3) => {
-			var usedSize = size;
+		const result = format.replace(/\${([^}]*?:)?([^:]*?)(:[\s\S]*?)?}/g, (match, p1, p2, p3) => {
+			let usedSize = size;
 			// Check modifier p1
 			const modifier = (p1 == null) ? '' : p1.substr(0, p1.length-1);
 			switch(modifier) {
@@ -442,14 +519,14 @@ export class Utility {
 		}
 
 		// Variables
-		var memWord = 0;
+		let memWord = 0;
 		let regsAsWell=false;
 
 		// Check if registers might be returned as well.
 		// Return registers only if 'name' itself is not a register.
 		if (!Z80RegistersClass.isRegister(name)) {
 			regsAsWell=true;
-			await Remote.getRegisters();
+			//await Remote.getRegisters();
 		}
 
 		// Check first if we need to retrieve address values
@@ -463,7 +540,7 @@ export class Utility {
 		}
 
 		// Formatting
-		var valString=Utility.numberFormattedSync(value, size, format, regsAsWell, name, memWord, tabSizeArr);
+		const valString=Utility.numberFormattedSync(value, size, format, regsAsWell, name, memWord, tabSizeArr);
 
 		// Return
 		return valString;
@@ -500,7 +577,7 @@ export class Utility {
 		// Search for format string '${...}'
 		// Note: [\s\S] is the same as . but also includes newlines.
 		// First search for '${'
-		var valString = format.replace(/\${([\s\S]*?)(?=\${|$)/g, (match, p) => {
+		let valString = format.replace(/\${([\s\S]*?)(?=\${|$)/g, (match, p) => {
 			// '${...' found now check for } from the left side.
 			// This assures that } can also be used inside a ${...}
 			const k = p.lastIndexOf('}');
@@ -516,9 +593,9 @@ export class Utility {
 			if(innerMatch == undefined)
 				return '${'+p1+'???}' + restP;
 			// Modifier
-			var usedValue;
-			var usedSize;
-			var modifier = innerMatch[1];	// e.g. 'b@:' or 'w@:'
+			let usedValue;
+			let usedSize;
+			let modifier = innerMatch[1];	// e.g. 'b@:' or 'w@:'
 			modifier = (modifier == null) ? '' : modifier.substr(0, modifier.length-1);
 			switch(modifier) {
 				case 'b@':
@@ -537,9 +614,9 @@ export class Utility {
 			}
 			// Continue formatting
 			const formatting = innerMatch[2];	// e.g. 'hex' or 'name' or the pre-strign for labels
-			var innerLabelSeparator = innerMatch[3];	// e.g. ', '
+			let innerLabelSeparator = innerMatch[3];	// e.g. ', '
 			innerLabelSeparator = (innerLabelSeparator == null) ? '' : innerLabelSeparator.substr(1);
-			var endLabelSeparator = innerMatch[4];	// e.g. ', '
+			let endLabelSeparator = innerMatch[4];	// e.g. ', '
 			endLabelSeparator = (endLabelSeparator == null) ? '' : endLabelSeparator.substr(1);
 			switch(formatting) {
 				case 'name':
@@ -564,23 +641,14 @@ export class Utility {
 					const s = Utility.getASCIIChar(usedValue);
 					return s + restP
 				case 'flags':
-					// interprete byte as Z80 flags:
-					// Zesarux: (e.g. "SZ5H3PNC")
-					// S Z X H X P/V N C
-					var res = (usedValue&0x80)? 'S' : '-';	// S=sign
-					res += (usedValue&0x40)? 'Z':'-';	// Z=zero
-					res += (usedValue&0x20)? '1':'-';
-					res += (usedValue&0x10)? 'H' : '-';	// H=Half Carry
-					res += (usedValue&0x08)? '1':'-';
-					res += (usedValue&0x04)? 'P' : '-';	// P/V=Parity/Overflow
-					res += (usedValue&0x02)? 'N' : '-';	// N=Add/Subtract
-					res += (usedValue&0x01)? 'C' : '-';	// C=carry
+					// Interpret byte as Z80 flags:
+					const res=this.getFlagsString(usedValue);
 					return res + restP;
 
 				case 'labels':
 				{
 					// calculate labels
-					const labels = Labels.getLabelsForNumber(value, regsAsWell);
+					const labels = Labels.getLabelsForNumber64k(value, regsAsWell);
 					// format
 					if(labels && labels.length > 0)
 						return modifier + labels.join(innerLabelSeparator) + endLabelSeparator + restP;
@@ -591,7 +659,7 @@ export class Utility {
 				case 'labelsplus':
 				{
 					// calculate labels
-					const labels = Labels.getLabelsPlusIndexForNumber(value, regsAsWell);
+					const labels = Labels.getLabelsPlusIndexForNumber64k(value, regsAsWell);
 					// format
 					if(labels && labels.length > 0)
 						return modifier + labels.join(innerLabelSeparator) + endLabelSeparator + restP;
@@ -610,15 +678,15 @@ export class Utility {
 			tabSizeArr = Utility.calculateTabSizes(format, size);
 		if(tabSizeArr)
 			if(tabSizeArr.length == valString.split('\t').length) {
-				var index = 0;
+				let index = 0;
 				valString += '\t';	// to replace also the last string
 				valString = valString.replace(/(.*?)\t/g, (match, p1, offset) => {
 					Utility.assert(tabSizeArr);
-					var tabSize = tabSizeArr![index].length;
+					const tabSize = tabSizeArr![index].length;
 					//if(index == 0)
 					//	--tabSize;	// First line missing the space in front
 					++index;
-					var result = p1 + " ";
+					let result = p1 + " ";
 					// right adjusted
 					const repeatLen = tabSize-p1.length;
 					if(repeatLen > 0)
@@ -632,9 +700,27 @@ export class Utility {
 		return valString;
 	}
 
+	/**
+	 * Convert value to flags string.
+	 * Useful to convert the F register number into a human readable string.
+	 */
+	public static getFlagsString(flagValue: number) {
+		// Interpret byte as Z80 flags:
+		// Zesarux: (e.g. "SZ5H3PNC")
+		// S Z X H X P/V N C
+		let res=(flagValue&0x80)? 'S':'-';	// S=sign
+		res+=(flagValue&0x40)? 'Z':'-';	// Z=zero
+		res+=(flagValue&0x20)? '1':'-';
+		res+=(flagValue&0x10)? 'H':'-';	// H=Half Carry
+		res+=(flagValue&0x08)? '1':'-';
+		res+=(flagValue&0x04)? 'P':'-';	// P/V=Parity/Overflow
+		res+=(flagValue&0x02)? 'N':'-';	// N=Add/Subtract
+		res+=(flagValue&0x01)? 'C':'-';	// C=carry
+		return res;
+	}
 
 	/**
-	 * Returns the formatted register value. Does a request to zesarux to obtain the register value.
+	 * Returns the formatted register value. Does a request to the Remote to obtain the register value.
 	 * @param regIn The name of the register, e.g. "A" or "BC"
 	 * @param formatMap The map with the formattings (hover map or variables map)
 	 * @returns A Promise with the formatted string.
@@ -645,7 +731,7 @@ export class Utility {
 		const format=formatMap.get(reg);
 		Utility.assert(format!=undefined, 'Register '+reg+' does not exist.');
 
-		await Remote.getRegisters();
+		//await Remote.getRegisters();
 		// Get value of register
 		const value=Remote.getRegisterValue(reg);
 
@@ -678,7 +764,9 @@ export class Utility {
 		if (rootPath) {
 			if (!rootPath.endsWith('/'))
 				rootPath+='/';
-			if (filePath.startsWith(rootPath))
+			// If window paths, then make sure both path start with lower case letters for comparison. rootPath does already.
+			const lcFilePath=UnifiedPath.getUnifiedPath(filePath);
+			if (lcFilePath.startsWith(rootPath))
 				filePath=filePath.substr(rootPath.length);
 		}
 		return filePath;
@@ -692,11 +780,11 @@ export class Utility {
 	 * @returns An absolute path
 	 */
 	public static getAbsFilePath(relFilePath: string, rootPath?: string): string {
-		if(path.isAbsolute(relFilePath))
+		if(UnifiedPath.isAbsolute(relFilePath))
 			return relFilePath;
 		// Change from relative to absolute
 		const usedRootPath = (rootPath) ? rootPath : Utility.rootPath || '';
-		const filePath = path.join(usedRootPath, relFilePath);
+		const filePath=UnifiedPath.join(usedRootPath, relFilePath);
 		return filePath;
 	}
 
@@ -708,11 +796,11 @@ export class Utility {
 	 * @param srcDirs The (relative) directories to search in.
 	 */
 	public static getAbsSourceFilePath(srcPath: string, srcDirs: Array<string>) {
-		if (path.isAbsolute(srcPath))
+		if (UnifiedPath.isAbsolute(srcPath))
 			return srcPath;
 		// Check all sources directories and try to locate the srcPath file.
 		for (let srcDir of srcDirs) {
-			const fPath=path.join(srcDir, srcPath);
+			const fPath=UnifiedPath.join(srcDir, srcPath);
 			const absFPath=Utility.getAbsFilePath(fPath);
 			if (fs.existsSync(absFPath))
 				return absFPath;
@@ -729,12 +817,13 @@ export class Utility {
 	 * @param srcDirs E.g. [ "src", "includes" ]
 	 */
 	public static getRelSourceFilePath(srcPath: string, srcDirs: Array<string>) {
-		if (path.isAbsolute(srcPath))
+		srcPath = UnifiedPath.getUnifiedPath(srcPath);
+		if (UnifiedPath.isAbsolute(srcPath))
 			return Utility.getRelFilePath(srcPath);
 
 		// Check all sources directories and try to locate the srcPath file.
 		for (let srcDir of srcDirs) {
-			const fPath=path.join(srcDir, srcPath);
+			const fPath=UnifiedPath.join(srcDir, srcPath);
 			const absFPath=Utility.getAbsFilePath(fPath);
 			if (fs.existsSync(absFPath))
 				return fPath;
@@ -750,7 +839,7 @@ export class Utility {
 	 * @returns The relative file path, e.g. ".tmp/state0.bin".
 	 */
 	public static getRelTmpFilePath(fileName: string): string {
-		const relFilePath = path.join(Settings.launch.tmpDir, fileName);
+		const relFilePath=UnifiedPath.join(Settings.launch.tmpDir, fileName);
 		return relFilePath;
 	}
 
@@ -762,7 +851,7 @@ export class Utility {
 	 * @returns The abs file path, e.g. "/Volumes/.../.tmp/state_0.bin".
 	 */
 	public static getAbsStateFileName(stateName: string): string {
-		const fPath=path.join('states', stateName)
+		const fPath=UnifiedPath.join('states', stateName)
 		const relPath=Utility.getRelTmpFilePath(fPath);
 		return Utility.getAbsFilePath(relPath);
 	}
@@ -771,9 +860,10 @@ export class Utility {
 	/**
 	 * Sets the root path or absolute and relative file functions.
 	 * @param rootPath What e.g. vscode.workspace.rootPath would return
-	 */	public static setRootPath(rootPath: string) {
+	 */
+	public static setRootPath(rootPath: string) {
 		Utility.assert(rootPath);
-		(Utility.rootPath as any)=rootPath;
+		(Utility.rootPath as any)=UnifiedPath.getUnifiedPath(rootPath);
 	}
 
 
@@ -782,7 +872,7 @@ export class Utility {
 	 * @param extPath Use what vscode.extensions.getExtension("maziac").extensionPath returns.
 	 */
 	public static setExtensionPath(extPath: string) {
-		Utility.extensionPath=extPath;
+		Utility.extensionPath = UnifiedPath.getUnifiedPath(extPath);
 	}
 
 
@@ -919,31 +1009,31 @@ export class Utility {
 
 
 	/**
-	 * Builds a condition for a breakpoint from an ASSERT expression.
+	 * Builds a condition for a breakpoint from an ASSERTION expression.
 	 * Simply inverts the expression by surrounding it with "!(...)".
-	 * @param assertExpression E.g. "A == 7"
+	 * @param assertionExpression E.g. "A == 7"
 	 * @returns E.g. "!(A == 7)"
 	 */
-	public static getConditionFromAssert(assertExpression: string) {
-		if (assertExpression.trim().length==0)
-			assertExpression='false';
-		return '!('+assertExpression+')';
+	public static getConditionFromAssertion(assertionExpression: string) {
+		if (assertionExpression.trim().length==0)
+			assertionExpression='false';
+		return '!('+assertionExpression+')';
 	}
 
 
 	/**
 	 * Strips off the "!(...)" from a breakpoint condition to
-	 * display it as ASSERT expression.
+	 * display it as ASSERTION expression.
 	 * Does no checking, simply strips away the character position.
 	 * @param bpCondition E.g. "!(A == 7)"
 	 * @returns E.g. "A == 7"
 	 */
-	public static getAssertFromCondition(bpCondition: string|undefined) {
+	public static getAssertionFromCondition(bpCondition: string|undefined) {
 		if (!bpCondition)
 			return '';
-		let assertCond=bpCondition.substr(2);	// cut off "!("
-		assertCond=assertCond.substr(0, assertCond.length-1);	// cut off trailing ")"
-		return assertCond;
+		let assertionCond=bpCondition.substr(2);	// cut off "!("
+		assertionCond=assertionCond.substr(0, assertionCond.length-1);	// cut off trailing ")"
+		return assertionCond;
 	}
 
 
@@ -969,7 +1059,13 @@ export class Utility {
 	public static assert(test: any, message?: string) {
 		if (!test) {
 			try {
-				throw Error(message);
+				/*
+				while (true) {
+					Log.log('assert');
+					console.log();
+				};
+				*/
+				throw Error("'assert' error. "+(message||""));
 			}
 			catch (err) {
 				// Log

@@ -1,11 +1,11 @@
 .DS_Store
 node_modules/
 out/
+dist/
 npm-debug.log
 /*.vsix
 logs/
 /data/
-.vscode/
 notes.md
 /coverage/
-
+**/.tmp/

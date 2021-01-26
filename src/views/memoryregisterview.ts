@@ -1,8 +1,4 @@
-'use strict';
-
-import { Remote  } from '../remotes/remotefactory';
-//import { Z80Registers } from './z80Registers';
-//import { EventEmitter } from 'events';
+import { Remote } from '../remotes/remotefactory';
 import { MemoryDumpView } from './memorydumpview';
 
 
@@ -17,14 +13,14 @@ export class MemoryRegisterView extends MemoryDumpView {
 	/// The registers to take into account.
 	protected registers = new Array<string>();
 
+
 	/**
-	 * Creates the basic panel.
+	 * Constructor.
 	 */
-	/*
-	constructor(parent: EventEmitter) {
-		super(parent);
+	constructor() {
+		super();
+		this.vscodePanel.title='Memory View for Registers';
 	}
-	*/
 
 
 	/**
@@ -36,30 +32,33 @@ export class MemoryRegisterView extends MemoryDumpView {
 
 
 	/**
-	 * Do not show dots between the memory blocks.
-	 */
-	protected getHtmlVertBreak() {
-		return '\n';
-	}
-
-
-	/**
 	 * Retrieves the memory content and displays it.
-	 * @param reason Not used.	 */
+	 * @param reason Not used.
+	 */
 	public async update(reason?: any): Promise<void> {
-		if (!this.vscodePanel)
-			return;
-
 		// Get register values
-		await Remote.getRegisters();
-		// Recalculate the memory addresses
-		this.memDump.clearBlocks();
-		this.vscodePanel.title='';
-		for (let reg of this.registers) {
-			// get register value
-			const value=Remote.getRegisterValue(reg);
-			// add memory block
-			this.addBlock(value, 1, '@'+reg);
+		//await Remote.getRegisters();
+
+		// If run the first time
+		if (!this.vscodePanel.webview.html) {
+			for (let reg of this.registers) {
+				// Get register value
+				const value=Remote.getRegisterValue(reg);
+				// Create new block
+				this.memDump.addBlock(value, 1, '@'+reg);
+			}
+		}
+		else {
+			// Change blocks
+			let i=0;
+			for (let reg of this.registers) {
+				// Get register value
+				const value=Remote.getRegisterValue(reg);
+				// Change existing mem block
+				this.memDump.changeBlock(i, value, 1);
+				// Next
+				i++;
+			}
 		}
 
 		// update

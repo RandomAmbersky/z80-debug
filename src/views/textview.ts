@@ -34,9 +34,6 @@ export class TextView extends BaseView {
 	 * @param text Text to display.
 	 */
 	protected setHtml(text: string) {
-		if (!this.vscodePanel)
-			return;
-
 		const format = `<!DOCTYPE html>
 		<html lang="en">
 		<head>

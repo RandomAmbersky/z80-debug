@@ -7,6 +7,7 @@ import { Remote, RemoteFactory } from '../remotes/remotefactory';
 import { Settings } from '../settings';
 //import { ZesaruxRegisters } from '../remotes/zesarux/decodezesaruxdata';
 import {Labels} from '../labels/labels';
+import {DecodeZesaruxRegisters} from '../remotes/zesarux/decodezesaruxdata';
 
 
 suite('Utility', () => {
@@ -298,6 +299,7 @@ suite('Utility', () => {
 				};
 				Settings.Init(cfg, '');
 				Z80RegistersClass.createRegisters();
+				Z80Registers.decoder=new DecodeZesaruxRegisters(0);
 				RemoteFactory.createRemote(cfg.remoteType);
 			});
 
@@ -386,6 +388,7 @@ suite('Utility', () => {
 			Settings.Init(cfg, '');
 			Z80RegistersClass.createRegisters();
 			RemoteFactory.createRemote(cfg.remoteType);
+			(Remote as any).configureMachine("RAM");
 		});
 
 		test('Register', async () => {
@@ -420,9 +423,9 @@ suite('Utility', () => {
 
 
 		test('Error', async () => {
-			let log='${(A}';	// incomplete -> creates an error
-			let evalString=await Utility.evalLogString(log);;
-			assert.equal('SyntaxError: Unexpected end of input', evalString);
+			let log = '${(A}';	// incomplete -> creates an error
+			let evalString = await Utility.evalLogString(log);
+			assert.equal("Error: Error evaluating '(A': Unexpected end of input", evalString);
 		});
 
 
@@ -492,24 +495,22 @@ suite('Utility', () => {
 
 
 		test('Label', async () => {
-			const cfg: any={
-				remoteType: 'zrcp'
+			const config = {
+				z80asm: [{
+					path: './src/tests/data/labels/z80asm.list', srcDirs: [""],	// Sources mode
+					excludeFiles: []
+				}]
 			};
-			Settings.Init(cfg, '');
-			Labels.init();
-			const labels=Labels;
-			labels.loadAsmListFile('./src/tests/data/sjasm1.list', undefined, [""], undefined, "sjasmplus", 0x0000);
-			labels.finish();
+			Labels.init(250);
+			Labels.readListFiles(config);
 
 			// Prepare memory
-			Remote.writeMemoryDump(0x80cb, new Uint8Array([0xFE]));
+			Remote.writeMemoryDump(0x7015, new Uint8Array([0xFE]));
 
-			let log='${b@(screen_top):signed}';
+			let log ='${b@(check_score_for_new_ship):signed}';
 			let evalString=await Utility.evalLogString(log);
 			assert.equal('-2', evalString);
 		});
-
-
 
 	});
 

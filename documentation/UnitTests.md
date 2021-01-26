@@ -12,7 +12,7 @@ It is recommended to use the sjasmplus assembler but you can also use other asse
 
 The [unit_tests.inc](unit_tests.inc) file provides macros in sjasmplus syntax.
 
-For other assemblers you most probably need an .inc file in a different format. Here is a [unit_tests_savannah.inc]](unit_tests_savannah.inc) in a format that e.g. Savannah's z80asm would understand. Maybe this can be used for other assemblers as well.
+For other assemblers you most probably need an .inc file in a different format. Here is a [unit_tests_savannah.inc](unit_tests_savannah.inc) in a format that e.g. Savannah's z80asm would understand. Maybe this can be used for other assemblers as well. (Note: it has less macros defined as the sjasmplus inc file.)
 
 Note: the z88dk z80asm is not supported as it lacks native support for macros.
 
@@ -76,24 +76,36 @@ E.g. the example above would result in 2 test suites: "Module1" and "Mod":
 ~~~
 
 
-### Test Macros
+### Test Macros / ASSERTION
 
-Inside the unit test you should use the provided unit test macros to test for failures [^1].
-[^1]: This is very similar to the assertions used in other languages.
+During unit testing WPMEM, LOGPOINTs and ASSERTIONs are automatically turned on, even if you don't enable them in 'commandsAfterLaunch'.
+The ASSERTION is especially required because you use it to test your assertions.
 
-There are macros available for various purposes, e.g. to test the registers for specific values or a memory location.
+E.g. write
+~~~
+	nop ; ASSERTION A == 6
+~~~
 
-Here is the complete list:
+to test that A is 6. DeZog will break here, failing the unit test, if A is not 6.
+Note the nop. It is not required but is used for clarity. If not used the break will happen on the next line. And, if you use several ASSERTION right after the other any assertion would result in any break on the same line.
+Therefore it's more clear to use the ```nop```.
+
+Inside the assertion you can use register and label names and a little math.
+You e.g. cannot test memory contains with the ASSERTs.
+
+Examples:
+~~~
+	nop ; ASSERTION A == 6
+	nop ; ASSERTION BC == COUNT+1
+	nop ; ASSERTION A == L
+	nop ; ASSERTION HL > LABEL_X
+~~~
+
+For testing memory contents and some other tasks there are a few predefined test macros available.
+
+Here is the complete list of available macros for sjasmplus:
 - TEST_MEMORY_BYTE addr, value: (addr) == value
 - TEST_MEMORY_WORD addr, value: (addr) == value
-- TEST_A value: A == value
-- TEST_A_UNEQUAL value: A != value
-- TEST_REG reg, value: reg == value, with reg = B|C|D|E|H|L
-- TEST_REG_UNEQUAL reg, value: reg != value, with reg = B|C|D|E|H|L
-- TEST_DREG dreg, value: dreg == value, with dreg = BC|DE|HL|IX|IY
-- TEST_DREG_UNEQUAL dreg, value: dreg != value, with dreg = BC|DE|HL|IX|IY
-- TEST_DREGS dreg1, dreg2: dreg1 == dreg2, with dreg1/2 = BC|DE|HL|IX|IY
-- TEST_DREGS_UNEQUAL dreg1, dreg2: dreg1 != dreg2, with dreg1/2 = BC|DE|HL|IX|IY
 - TEST_STRING addr, string, term0: Compares 2 strings (addr and string)
 - TEST_STRING_PTR addr1, addr2: Compares 2 null-terminated strings strings (addr1 and addr2)
 - TEST_MEM_CMP addr1, addr2, count: Compares to memory area on equality.
@@ -105,18 +117,28 @@ If the condition is fulfilled the code execution carries on after the macro and 
 
 Example:
 ~~~
+result:	defb 0
+
+multiply_a_by_3:
+	add a
+	add a
+	add a
+	ld (result),a
+	ret
+
+
 UT_mytest2:
 	ld a,5
 	call multiply_a_by_3
-	TEST_REG C, 15
+	TEST_MEMORY_BYTE result, 15
 
 	ld a,0
 	call multiply_a_by_3
-	TEST_REG C, 0
+	TEST_MEMORY_BYTE result, 0
 
 	TC_END
 ~~~
-This simple example test the subroutine 'multiply_a_by_3' which hypothetically takes A, multiplies it by 3 and returns the result in C. If A is 5 it should result in 15 and if A is 0 it should be 0.
+This simple example test the subroutine 'multiply_a_by_3' which takes A, multiplies it by 3 and stores the result. If A is 5 it should result in 15 and if A is 0 it should be 0.
 
 Please note that if you run a unit test case in debug mode the debugger will stop execution at exactly the macro that failed.
 
@@ -139,7 +161,7 @@ UT_mytest2:
 	...
 	TC_END
 ~~~
-It check that 'my_subroutine' does not change the values of B, C, D, and E.
+It checks that 'my_subroutine' does not change the values of B, C, D, and E.
 It however doesn't care about changing A or HL.
 
 There are a few macros defined for testing:
@@ -157,7 +179,7 @@ There are a few macros defined for testing:
 - TEST_UNCHANGED_L
 
 Furthermore the macro USE_ALL_REGS fills all registers with predefined values A, BC, DE, HL, IX, IY and the shadow registers. (USE_ALL_REGS2 is the same with different values.)
-THis macro can be used in conditions that you want to test that your subroutine does not use one of the registers by accident. Or in other words: with using this macro you make sure that no register has any meaningful value by accident.
+This macro can be used in conditions that you want to test that your subroutine does not use one of the registers by accident. Or in other words: with using this macro you make sure that no register has any meaningful value by accident.
 
 
 ## Provide Initialization Routine
@@ -190,13 +212,17 @@ At best you copy a working configuration, change its name (to e.g. "Unit Tests")
 - the property 'topOfStack' is not required and ignored if set. Instead an own stack (with default size of 50 words) is used.
 - 'startAutomatically': The default is false for unit tests. I.e. if you run a unit test in debug mode it will automatically break at the start of the tests. I.e. it will stop at the start of the first test.
 If you like you can set this set this to true, but then you need to set a breakpoint inside your unit test if you debug it otherwise the unit test will be finished before you can see anything in the debugger.
+- You need not enable WPMEM, ASSERTION or LOGPOINT. They are automatically enabled for unit tests.
 - You must remove any occurrence of 'execAddr' because it is superfluous. For unit tests the addresses of the labels are calculated automatically and the PC (program counter) is set accordingly.
 
 
 ## Start the Unit Tests
 
-Make sure ZEsarUX is running and has remote control enabled (just like in a normal debugging session).
-Make sure that no debug session is currently running.
+For most unit tests you shouldn't need much (ZX) HW, ie. you could run them in the internal Z80 simulator (zsim).
+If you need more sophisticated HW emulation use ZEsarUX or CSpect.
+The internal simulator and ZEsarUX support memory breakpoints which can be an advantage if you make use of WPMEM in your sources.
+If you use ZEsarUX or CSpect make sure it is running (just like in a normal debugging session).
+Make sure that no "normal" debug session is currently running.
 
 Press F1 for the command palette to appear.
 Enter "dezog: Run all unit tests".
@@ -249,7 +275,9 @@ The PC stops at the test because A is obviously not 0.
 Obviously a unit test case fails if the checked condition (the TEST_... macros) fails.
 But there are a few other cases when a test case fails:
 - unitTestTimeout: If the test case does not return within this time the test case has failed. Default is 1 sec (unit is secs). If this is not enough you can change the value (for all test cases) in the launch configuration.
-- breakpoint hit: When a breakpoint is hit the test case has failed. This will happen if you for example have memory guard (WPMEM) and the unit test has e.g. written into a guarded memory area. This can also happen if you an ASSERT fails somewhere. If in debug mode the test case will also be counted as failed but the code execution also stops at the particular line of code. So you can directly investigate what happened.
+- breakpoint hit: When a breakpoint is hit the test case has failed. This will happen if you for example have memory guard (WPMEM) and the unit test has e.g. written into a guarded memory area. This can also happen if you an ASSERTION fails somewhere. If in debug mode the code execution also stops at the particular line of code. So you can directly investigate what happened. You will also see the values used in the ASSERTION so you can directly see what went wrong.
+
+Note: During debug if you continue from a break condition, e.g. an ASSERTION, and reach the end of the unit test, the unit test will be counted as pass. If it's run (not debugged) it will, of course, not reach the end and counted as fail.
 
 
 # Code Coverage
@@ -259,6 +287,18 @@ You can easily see what instructions have been covered by a test and which not.
 The coverage decoration is also available when running the unit tests in debug mode.
 It is reset whenever you start a new debug session or a new unit test.
 If you need to clear the coverage decoration at some other point go tp the command palette and enter "dezog: Clear the current code coverage decoration"
+
+Note: Code coverage is not supported in "cspect" or "zxnext".
+
+
+# A note about banking
+
+Wherever you place the UNITTEST_INITIALIZE macro this is also the place where the unit test stack is created.
+If you are testing in a system with banked memory you can still place it in any slot you like. But you need to be aware that the unit test stack is also created in the same bank. I.e. the bank should be accessible all the time as long as the stack is being used.
+Of course, you can switch to another stack. But make sure that before you call TC_END the bank is again accessible.
+
+The memory test macros like TEST_MEMORY_BYTE etc. do work with 64k addresses. I.e. they don't do any changes to the used banks.
+So, if you want to test memory of some other bank then make sure that you page it in before.
 
 
 # What Else
@@ -276,6 +316,6 @@ Example:
 # Caveats
 
 If you use a .sna file the inherited start address is simply ignored.
-You can use .sna and plain .obj files for unit tests. .tap files will not work as the loading is emulated.
+You can use .sna, .nex and plain .obj files for unit tests. .tap files will not work as the loading is emulated.
 
 

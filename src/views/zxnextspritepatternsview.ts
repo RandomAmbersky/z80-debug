@@ -286,7 +286,7 @@ export class ZxNextSpritePatternsView extends BaseView {
 		// Create false colors palette
 		const falseColorsPalette = new Array<number>(3*256);
 		let k=0;
-		var rng=new Random.MT(12345);	// Use always teh same seed
+		const rng=new Random.MT(12345);	// Use always the same seed
 		for(let i=0;i<256; i++) {
 			falseColorsPalette[k++]=rng.range(0, 255);
 			falseColorsPalette[k++]=rng.range(0, 255);
@@ -397,7 +397,7 @@ export class ZxNextSpritePatternsView extends BaseView {
 			// Mark as invalid until pattern have been loaded.
 			this.patternDataValid=(!reason||reason.step!=true);
 
-			// TODO: Muss ich verloggen um rauszukriegen wo currentpalette auf -1 gesetzt wird.
+			// REMARK: Muss ich verloggen um rauszukriegen wo currentpalette auf -1 gesetzt wird.
 
 			// Load palette if not available
 			await this.getSpritesPalette();
@@ -663,9 +663,6 @@ export class ZxNextSpritePatternsView extends BaseView {
 	* Sets the html code to display the sprite patterns.
 	*/
 	protected setHtml() {
-		if (!this.vscodePanel)
-			return;
-
 		const format = this.createHtmlSkeleton();
 		// Add content
 		const ui = this.createScriptsAndButtons();

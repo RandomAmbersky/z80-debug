@@ -63,10 +63,9 @@ The table below shows which commands are used with what remote:
 | CMD_SET_REGISTER      | X       | X      | X      |
 | CMD_WRITE_BANK        | X       | X      | X      |
 | CMD_CONTINUE          | X       | X      | X      |
-| CMD_PAUSE             | X       | X      | X      |
+| CMD_PAUSE             | X       | X      | -      |
 | CMD_READ_MEM          | X       | X      | X      |
 | CMD_WRITE_MEM         | X       | X      | X      |
-| CMD_GET_SLOTS         | X       | X      | X      |
 | CMD_SET_SLOT          | X       | X      | X      |
 | CMD_GET_TBBLUE_REG    | X       | X      | X      |
 | CMD_SET_BORDER        | X       | X      | X      |
@@ -88,6 +87,18 @@ DeZog knows with which remote it communicates and chooses the right subset.
 
 
 ## History
+
+### 2.0.0
+
+Changed:
+- CMD_INIT: Added memory model.
+- CMD_GET_REGISTERS: Added slot/bank information.
+- NTF_PAUSE: Added long address.
+- CMD_ADD_BREAKPOINT: Added long address.
+- CMD_SET_BREAKPOINTS: Changed to send additionally the bank info for all breakpoints.
+- CMD_RESTORE_MEM: Changed to send additionally the bank info for all restored locations.
+Removed:
+- CMD_GET_SLOTS: Now done with CMD_GET_REGISTERS.
 
 ### 1.6.0
 - Added CMD_CLOSE for closing a debug session.
@@ -128,170 +139,201 @@ DeZog knows with which remote it communicates and chooses the right subset.
 ### 0.1.0
 - Initial experimental version.
 
+
 # Data Format
 
-The message format is very simple. It starts with the length information followed by a byte containing the command or response ID and then the data.
+The message format is very simple. It starts with the length information followed by a byte containing the sequence number.
+For commands a byte with the command ID will follow.
+And then the payload follows.
+
+Length is the length of all bytes folowing Length.
+
+Command:
 
 | Index | Size | Description |
 |-------|------|-------------|
-| 0     | 4    | Length of the following data beginning with 'Command ID' (little endian) |
+| 0     | 4    | Length of the payload data. (little endian) |
 | 4     | 1    | Sequence number, 1-255. Increased with each command |
-| 5     | 1    | Command ID or Response ID |
-| 6     | 1    | Data[0] |
+| 5     | 1    | Command ID |
+| 6     | 1    | Payload: Data[0] |
 | ...   | ...  | Data[...] |
 | 6+n-1 | 1    | Data[n-1] |
 
-The response ID is the same as the corresponding command ID.
+
+Response:
+
+| Index | Size | Description |
+|-------|------|-------------|
+| 0     | 4    | Length of the following data beginning with the sequence number. (little endian) |
+| 4     | 1    | Sequence number, same as command. |
+| 5     | 1    | Payload: Data[0] |
+| ...   | ...  | Data[...] |
+| 5+n-1 | 1    | Data[n-1] |
+
 The numbering for Commands starts at 1. (0 is reserved, i.e. not used).
 The numbering for notifications starts at 255 (counting down).
-So in total there are 255 possible commands and notifications.
+So in total there are 255 possible commands.
+
+There is one notification defined which uses the seqeunce number 0.
+
+Notification:
+
+| Index | Size | Description |
+|-------|------|-------------|
+| 0     | 4    | Length of the following data beginning with the sequence number. (little endian) |
+| 4     | 1    | Sequence number = 0. |
+| 5     | 1    | Payload: Data[0] |
+| ...   | ...  | Data[...] |
+| 5+n-1 | 1    | Data[n-1] |
+
+
+# Long addresses
+
+With DZRP 2.0.0 (and Dezog 2.0.0) 'long addresses' have been introduced. These are addresses that not only carry the 64k address but additionally 1 byte for the memory bank information.
+
+The stored bank info is the bank number plus 1.
+This is because of the special meaning of ```bank==0``` in DeZog.
+```bank==0``` in DeZog means that not a long address is used but a "normal" 64k address. Since DeZog can work in both modes it is necessary to distinguish those also in the DZRP.
 
 
 # Commands and Responses
 
-## CMD_INIT
+## CMD_INIT=1
 
 This is the first command sent after connection.
 The command sender will evaluate the received version and disconnect if versions do not match.
 
-Command:
+Command (Length=4+n):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 5+n   | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 1     | CMD_INIT   |
-| 6     | 3    | 0-255, 0-255, 0-255 | Version (of the command sender): 3 bytes, big endian: Major.Minor.Patch |
-| 9     | 1-n  | 0-terminated string | The program name + version as a string. E.g. "DeZog v1.4.0" |
+| 0     | 3    | 0-255, 0-255, 0-255 | Version (of the command sender): 3 bytes, big endian: Major.Minor.Patch |
+| 3     | 1-n  | 0-terminated string | The program name + version as a string. E.g. "DeZog v1.4.0" |
 
 
-Response:
+Response (Length=7+n):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 5+n   | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 1    | 0/1-255 | Error: 0=no error, 1=general (unknown) error. |
-| 6     | 3    | 0-255, 0-255, 0-255 | Version (of the response sender) : 3 bytes, big endian: Major.Minor.Patch |
-| 9     | 1-n  | 0-terminated string | The responding program name + version as a string. E.g. "dbg_uart_if v1.0.0" |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 1    | 0/1-255 | Error: 0=no error, 1=general (unknown) error. |
+| 2     | 3    | 0-255, 0-255, 0-255 | Version (of the response sender) : 3 bytes, big endian: Major.Minor.Patch |
+| *5    | 1    | 0-255 | Machine type (memory model): 1 = ZX16K, 2 = ZX48K, 3 = ZX128K, 4 = ZXNEXT. Note: Only ZXNEXT is supported. |
+| 6    | 1-n  | 0-terminated string | The responding program name + version as a string. E.g. "dbg_uart_if v2.0.0" |
 
 
-## CMD_CLOSE
+## CMD_CLOSE=2
 
 This is the last command. It is sent when the debug session is closed gracefully.
 There is no guarantee that this command is sent at all, e.g. when the connection is disconnected ungracefully.
 But the receiver could use it e.g. to show the (assumed) connection status.
 
-Command:
+Command (Length=0):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2   | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 2     | CMD_CLOSE  |
+| -     | -    | -     | -          |
 
 
-Response:
-| Index | Size | Value |Description |
-|-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-
-
-## CMD_GET_REGISTERS
-
-Command:
-| Index | Size | Value |Description |
-|-------|------|-------|------------|
-| 0     | 4    | 2     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 3     | CMD_GET_REGISTERS |
-
-Response:
-| Index | Size | Value |Description |
-|-------|------|-------|------------|
-| 0     | 4    | 29    | Length     |
-| 4     | 1    | 1-255 | Same seq no     |
-| 5     | 2    | PC   | All little endian    |
-| 7     | 2    | SP   |   |
-| 9     | 2    | AF   |   |
-| 11    | 2    | BC   |   |
-| 13    | 2    | DE   |   |
-| 15    | 2    | HL   |   |
-| 17    | 2    | IX   |   |
-| 19    | 2    | IY   |   |
-| 21    | 2    | AF2  |   |
-| 23    | 2    | BC2  |   |
-| 25    | 2    | DE2  |   |
-| 27    | 2    | HL2  |   |
-| 28    | 1    | R    |   |
-| 39    | 1    | I    |   |
-| 30    | 1    | IM   |   |
-| 31    | 1    | reserved |   |
-
-
-## CMD_SET_REGISTER
-
-Command:
-| Index | Size | Value |Description |
-|-------|------|-------|------------|
-| 0     | 4    | 5     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 4     | CMD_SET_REGISTER |
-| 6     | 1    | i     | Register number: 0=PC, 1=SP, 2=AF, 3=BC, 4=DE, 5=HL, 6=IX, 7=IY, 8=AF', 9=BC', 10=DE', 11=HL', 13=IM, 14=F, 15=A, 16=C, 17=B, 18=E, 19=D, 20=L, 21=H, 22=IXL, 23=IXH, 24=IYL, 25=IYH, 26=F', 27=A', 28=C', 29=B', 30=E', 31=D', 32=L', 33=H', 34=R, 35=I |
-| 7     | 2  | n  | The value to set. Little endian. If register is one byte only the lower byte is used but both bytes are sent. |
-
-
-Response:
+Response (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
 | 0     | 4    | 1     | Length     |
 | 4     | 1    | 1-255 | Same seq no |
 
 
-## CMD_WRITE_BANK
+## CMD_GET_REGISTERS=3
 
-Command:
+Command (Length=0):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 8195  | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 5     | CMD_WRITE_BANK |
-| 6     | 1    | 0-223 | 8k bank number |
-| 7     | 1    | [0]   | First byte of memory block |
+| -     | -    | -     | -          |
+
+
+Response (Length=30+Nslots):
+| Index | Size | Value |Description |
+|-------|------|-------|------------|
+| 0    | 1    |       | Sequence number |
+| 1     | 2    | PC   | All little endian |
+| 3     | 2    | SP   |   |
+| 5     | 2    | AF   |   |
+| 7     | 2    | BC   |   |
+| 9     | 2    | DE   |   |
+| 11    | 2    | HL   |   |
+| 13    | 2    | IX   |   |
+| 15    | 2    | IY   |   |
+| 17    | 2    | AF2  |   |
+| 19    | 2    | BC2  |   |
+| 21    | 2    | DE2  |   |
+| 23    | 2    | HL2  |   |
+| 25    | 1    | R    |   |
+| 26    | 1    | I    |   |
+| 27    | 1    | IM   |   |
+| 28    | 1    | reserved |   |
+| 29    | 1    | 1-255 | Nslots. The number of slots that will follow.  |
+| *30   | slot[0] | 0-255 | The slot contents, i.e. the bank number |
+| ...   | ...  | ...  | " |
+| *29+Nslots | slot[Nslots-1] | 0-255 | " |
+
+
+## CMD_SET_REGISTER=4
+
+Command (Length=3):
+| Index | Size | Value |Description |
+|-------|------|-------|------------|
+| 0     | 1    | i     | Register number: 0=PC, 1=SP, 2=AF, 3=BC, 4=DE, 5=HL, 6=IX, 7=IY, 8=AF', 9=BC', 10=DE', 11=HL', 13=IM, 14=F, 15=A, 16=C, 17=B, 18=E, 19=D, 20=L, 21=H, 22=IXL, 23=IXH, 24=IYL, 25=IYH, 26=F', 27=A', 28=C', 29=B', 30=E', 31=D', 32=L', 33=H', 34=R, 35=I |
+| 1     | 2  | n  | The value to set. Little endian. If register is one byte only the lower byte is used but both bytes are sent. |
+
+
+Response (Length=1):
+| Index | Size | Value |Description |
+|-------|------|-------|------------|
+| 0     | 1    | 1-255 | Same seq no |
+
+
+## CMD_WRITE_BANK=5
+
+Command (Length=1+N):
+| Index | Size | Value |Description |
+|-------|------|-------|------------|
+| 0     | 1    | 0-255 | Bank number |
+| 1     | 1    | [0]   | First byte of memory block |
 | ..    | ..   | ...   | ... |
-| 8194 | 1    | [0x1FFF] | Last byte of memory block |
+| *N   | 1    | [N-1] | Last byte of memory block |
 
 
-Response:
+Example for ZXNext with 8K memory banks:
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
+| 0     | 1    | 0-223 | 8k bank number |
+| 1     | 1    | [0]   | First byte of memory block |
+| ..    | ..   | ...   | ... |
+| 8191  | 1    | [0x1FFF] | Last byte of memory block |
 
-Note: Maybe I need to add an error code here in case the bank that is used by the DeZogIf on a ZX Next is going to be overwritten.
-At the moment DeZogIf simply restarts itself and does not respond.
 
-
-## CMD_CONTINUE
-
-Command:
+Response (Length=2+n):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 13    | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 6     | CMD_CONTINUE |
-| 6     | 1    | 0/1   | Enable Breakpoint1 |
-| 7     | 2    | 0-0xFFFF | Breakpoint1 address |
-| 9     | 1    | 0/1   | Enable Breakpoint2 |
-| 10    | 2    | 0-0xFFFF | Breakpoint2 address |
-| 12    | 1    | 0/1/2 | Alternate command: 0=no alternate command, 1=step-over, 2=step-out. The following range is only defined for 1 (step-over) |
-| 13    | 2    | 0-0xFFFF | range start (inclusive) for step-over |
-| 15    | 2    | 0-0xFFFF | range end (exclusive) for step-over |
+| 0     | 1    | 1-255 | Same seq no |
+| *1     | 1    | 0-255 | Error: 0=no error, 1 = error. |
+| *2     | 1-n  | 0-terminated string | Either 0 or a string which explains the error. E.g. one could have tried to overwrite ROM or the DezogIf program. |
 
 
-Response:
+## CMD_CONTINUE=6
+
+Command (Length=11):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
+| 0     | 1    | 0/1   | Enable Breakpoint1 |
+| 1     | 2    | 0-0xFFFF | Breakpoint1 address |
+| 3     | 1    | 0/1   | Enable Breakpoint2 |
+| 4     | 2    | 0-0xFFFF | Breakpoint2 address |
+| 6     | 1    | 0/1/2 | Alternate command: 0=no alternate command, 1=step-over, 2=step-out. The following range is only defined for 1 (step-over) |
+| 7     | 2    | 0-0xFFFF | range start (inclusive) for step-over |
+| 9     | 2    | 0-0xFFFF | range end (exclusive) for step-over |
+
+
+Response (Length=1):
+| Index | Size | Value |Description |
+|-------|------|-------|------------|
+| 0     | 1    | 1-255 | Same seq no |
 
 
 Note 1:
@@ -311,105 +353,74 @@ Note 2:
 - The breakpoints are temporary. They will be removed automatically after the command is finished.
 
 
-## CMD_PAUSE
+## CMD_PAUSE=7
 
-Command:
+Command (Length=0):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 7     | CMD_PAUSE    |
+| -     | -    | -     | -          |
 
 
-Response:
+Response (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
+| 0     | 1    | 1-255 | Same seq no |
 
 
 
-## CMD_READ_MEM
+## CMD_READ_MEM=8
 
-Command:
+Command (Length=6):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 7     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 8     | CMD_READ_MEM |
-| 6     | 1    | 0     | reserved  |
-| 7     | 2    | addr  | Start of the memory block |
-| 9     | 2    | n     | Size of the memory block |
+| 0     | 1    | 8     | CMD_READ_MEM |
+| 1     | 1    | 0     | reserved  |
+| 2     | 2    | addr  | Start of the memory block |
+| 4     | 2    | n     | Size of the memory block |
 
 
-Response:
+Response (Length=N+1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1+n   | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 1    | addr[0] | First byte of memory block |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 1    | addr[0] | First byte of memory block |
 | ..    | ..   | ...   | ... |
-| 5+n-1 | 1    | addr[n-1] | Last byte of memory block |
+| 1+n-1 | 1    | addr[n-1] | Last byte of memory block |
 
 
-## CMD_WRITE_MEM
+## CMD_WRITE_MEM=9
 
-Command:
+Command (Length=4+N):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 5+n   | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 9     | CMD_WRITE_MEM |
-| 6     | 1    | 0     | reserved  |
-| 7     | 2    | addr  | Start of the memory block |
-| 9     | 1    | addr[0] | First byte of memory block |
+| 0     | 1    | 9     | CMD_WRITE_MEM |
+| 1     | 1    | 0     | reserved  |
+| 2     | 2    | addr  | Start of the memory block |
+| 4     | 1    | addr[0] | First byte of memory block |
 | ...   | ...  | ...   | ... |
-| 9+n-1 | 1    | addr[n-1] | Last byte of memory block |
+| 4+n-1 | 1    | addr[n-1] | Last byte of memory block |
 
 
-Response:
+Response (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
+| 0     | 1    | 1-255 | Same seq no |
 
 
-## CMD_GET_SLOTS
+## CMD_SET_SLOT=10
 
+Command (Length=2):
+| Index | Size | Value |Description |
+|-------|------|-------|------------|
+| 0     | 1    | 0-255 | The slot to set. |
+| 1     | 1    | 0-255 | The 8k bank to use. |
+
+Example for ZXNext:
 Command:
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 5+n   | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 10    | CMD_GET_SLOTS |
-
-
-Response:
-| Index | Size | Value |Description |
-|-------|------|-------|------------|
-| 0     | 4    | 9     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 1    | slot[0] | The bank number associated with slot 0 |
-| 6     | 1    | slot[1] | The bank number associated with slot 1 |
-| ...   | ...  | ..      | ... |
-| 5     | 1    | slot[7] | The bank number associated with slot 7 |
-
-Note:
-- ROM0 = 254
-- ROM1 = 255
-On real HW this is the same, 0xFF is returned for both.
-
-
-## CMD_SET_SLOT
-
-Command:
-| Index | Size | Value |Description |
-|-------|------|-------|------------|
-| 0     | 4    | 4     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 11    | CMD_SET_SLOT |
-| 6     | 1    | 0-7   | The slot to set. |
-| 7     | 1    | 0-223, 0xFF | The 8k bank to use. |
+| 0     | 1    | 0-7   | The slot to set. |
+| 1     | 1    | 0-223, 0xFE, 0xFF | The 8k bank to use. |
 
 Note:
 - ROM0 = 254
@@ -417,329 +428,284 @@ Note:
 On real HW this is the same, 0xFE and 0xFF will both be interpreted as 0xFF.
 
 
-Response:
+Response (Length=2):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 1    | 0/1   | Error code. 0 = No error. 1 = could not set slot. At the moment this should return always 0. |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 1    | 0/1   | Error code. 0 = No error. 1 = could not set slot. At the moment this should return always 0. |
 
 
-## CMD_GET_TBBLUE_REG
+## CMD_GET_TBBLUE_REG=11
 
-Command:
+Command (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 3  | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 12    | CMD_GET_TBBLUE_REG |
-| 6     | 1    | 0-255 | The register |
+| 0     | 1    | 0-255 | The register |
 
-Response:
+Response (Length=2):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 1    | 0-255 | Value of the register |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 1    | 0-255 | Value of the register |
 
 
-## CMD_SET_BORDER
+## CMD_SET_BORDER=12
 
-Command:
+Command (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 3     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 13    | CMD_SET_BORDER |
-| 6     | 1    | Bits 0-2: color  | The color for the border |
+| 6     | 1    | Bits 0-2: color | The color for the border |
 
 
-Response:
+Response (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
 | 4     | 1    | 1-255 | Same seq no |
 
 
-## CMD_SET_BREAKPOINTS
+## CMD_SET_BREAKPOINTS=13
 
-Command:
+Command (Length=3*N):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2+2*N | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 14    | CMD_SET_BREAKPOINTS |
-| 6     | 2    | 0-65535 | Breakpoint address[0] |
-| 8     | 2    | 0-65535 | Breakpoint address[1] |
+| 0     | 2    | 0-65535 | Breakpoint[0].address |
+| *2     | 1    | 0-255 | Breakpoint[0].bank+1 |
+| 3     | 2    | 0-65535 | Breakpoint[1].address |
+| 5    | 1    | 0-255 | Breakpoint[1].bank+1 |
 | ...   | ...  | ...   | ... |
-| 6+2*N | 2    | 0-65535 | Breakpoint address[N-1] |
+| 3*(N-1) | 2    | 0-65535 | Breakpoint[N-1].address |
+| 2+3*(N-1) | 1  | 0-255 | Breakpoint[N-1].bank+1 |
 
 
-Response:
+Response (Length=1+N):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1+N   | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 1    | 0-255 | Memory at breakpoint address[0] |
-| 6     | 1    | 0-255 | Memory at breakpoint address[1] |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 1    | 0-255 | Memory at breakpoint address[0] |
+| 2     | 1    | 0-255 | Memory at breakpoint address[1] |
 | ...   | ...  | ...   | ... |
-| 5+N   | 1    | 0-255 | Memory at breakpoint address[N-1] |
+| N     | 1    | 0-255 | Memory at breakpoint address[N-1] |
 
 Notes:
 - This command is only used by the ZX Next, not by the emulators.
-- N is max. 21844 ((65536-2)/3)
+- N is max. 16383 ((65536-2)/4), see CMD_RESTORE_MEM.
+- long addresses (with bank info are passed, bank=0: 64k address)
 
 
-## CMD_RESTORE_MEM
+## CMD_RESTORE_MEM=14
 
 Restores the memory previously overwritten by CMD_SET_BREAKPOINTS.
 
-Command:
+Command (Length=4*N):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2+3*N | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 15    | CMD_RESTORE_MEM |
-| 6     | 2    | 0-65535 | Address[0] |
-| 8     | 1    | 0-255 | Value to restore |
-| 9     | 2    | 0-65535 | Address[1] |
-| 11    | 1    | 0-255 | Value to restore |
+| 0     | 2    | 0-65535 | [0].address |
+| *2     | 1    | 0-255 | [0].bank+1 |
+| 3     | 1    | 0-255 | Value to restore |
+| 4     | 2    | 0-65535 | [1].address |
+| 6     | 1    | 0-255 | [1].bank+1 |
+| 7    | 1    | 0-255 | Value to restore |
 | ...   | ...  | ...   | ... |
-| 6+3*N | 2    | 0-65535 | Address[N-1] |
-| 8+3*N | 1    | 0-255 | Value to restore |
+| 4*(N-1) | 2    | 0-65535 | [N-1].address |
+| 1+4*(M-1) | 1    | 0-255 | [N-1].bank+1 |
+| 2+4*(N-1) | 1    | 0-255 | Value to restore |
 
 
-Response:
+Response (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
+| 0     | 1    | 1-255 | Same seq no |
 
 Notes:
 - This command is only used by the ZX Next, not by the emulators.
-- N is max. 21844 ((65536-2)/3)
+- N is max. 16383 ((65536-2)/4)
+- long addresses (with bank info) are passed, bank=0: 64k address
 
 
-## CMD_LOOPBACK
+## CMD_LOOPBACK=15
 
-Command:
+Command (Length=N):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2+N   | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 16    | CMD_LOOPBACK |
-| 6     | 1    | 0-255 | Data[0] |
+| 0     | 1    | 0-255 | Data[0] |
 | ...   | ...  | ...   | ...       |
-| 6+N   | 1    | 0-255 | Data[N-1] |
+| N-1   | 1    | 0-255 | Data[N-1] |
 
-Response:
+Response (Length=N+1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1+N   | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 1    | 0-255 | Data[0]    |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 1    | 0-255 | Data[0]    |
 | ...   | ...  | ...   | ...        |
-| 5+N   | 1    | 0-255 | Data[N-1]  |
+| N     | 1    | 0-255 | Data[N-1]  |
 
 N is max. 8192.
 
+Loops back the received data. Used for testing purposes.
 
-## CMD_GET_SPRITES_PALETTE
 
-Command:
+## CMD_GET_SPRITES_PALETTE=16
+
+Command (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 3     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 17    | CMD_GET_SPRITES_PALETTE |
-| 6     | 1    | 0/1   | Palette index |
+| 0     | 1    | 0/1   | Palette index |
 
-Response:
+Response (Length=513):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 513   | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 512  | 0-255 | The 256 palette values, 9bit values, little endian, the 2nd byte bit 0 contains the lowest bit of the blue 3-bit color. RRRGGGBB, 0000000B |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 512  | 0-255 | The 256 palette values, 9bit values, little endian, the 2nd byte bit 0 contains the lowest bit of the blue 3-bit color. RRRGGGBB, 0000000B |
 
 
 
-## CMD_GET_SPRITES_CLIP_WINDOW_AND_CONTROL
+## CMD_GET_SPRITES_CLIP_WINDOW_AND_CONTROL=17
 
-Command:
+Command (Length=0):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 18    | CMD_GET_SPRITES_CLIP_WINDOW_AND_CONTROL |
+| -     | -    | -     | -          |
 
-Response:
+Response (Length=6):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 6     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 1    | 0-255 | x-left     |
-| 6     | 1    | 0-255 | x-right    |
-| 7     | 1    | 0-255 | y-top      |
-| 8     | 1    | 0-255 | y-bottom   |
-| 9     | 1    | 0-255 | control byte (from register 0x15) |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 1    | 0-255 | x-left     |
+| 2     | 1    | 0-255 | x-right    |
+| 3     | 1    | 0-255 | y-top      |
+| 4     | 1    | 0-255 | y-bottom   |
+| 5     | 1    | 0-255 | control byte (from register 0x15) |
 
 
 
-## CMD_GET_SPRITES
+## CMD_GET_SPRITES=18
 
-Command:
+Command (Length=2):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 4     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 30    | CMD_GET_SPRITES |
-| 6     | 1    | 0-128 | Sprite index |
-| 7     | 1    | 0-128 | N. Count of sprites |
+| 0     | 1    | 0-128 | Sprite index |
+| 1     | 1    | 0-128 | N. Count of sprites |
 
-Response:
+Response (Length=1+5*N):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1+5*N | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 5*N  | 0-255 | 5 bytes per sprite: Attribute 0, 1, 2, 3, 4 |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 5*N  | 0-255 | 5 bytes per sprite: Attribute 0, 1, 2, 3, 4 |
 
 
-## CMD_GET_SPRITE_PATTERNS
+## CMD_GET_SPRITE_PATTERNS=19
 
-Command:
+Command (Length=4):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 6     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 31    | CMD_GET_SPRITE_PATTERNS |
-| 6     | 2    | 0-63  | index of 256 byte pattern. |
-| 7     | 2    | 0-64  | N. Number of patterns to retrieve |
+| 0     | 2    | 0-63  | index of 256 byte pattern. |
+| 2     | 2    | 0-64  | N. Number of patterns to retrieve |
 
 Note: It is not possible to read just a 128 byte pattern, instead always 256 patterns are read.
 
-Response:
+Response (Length=1+256*N):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1+N*256 | Length   |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | N*256| 0-255 | Pattern memory data. |
+| 0     | 1    | 1-255 | Same seq no |
+| 2     | N*256| 0-255 | Pattern memory data. |
 
 Note: 512 = 16x16x2.
 
 
-## CMD_ADD_BREAKPOINT
+## CMD_ADD_BREAKPOINT=40
 
-Command:
+Command (Length=3+n):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 4+n   | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 40    | CMD_ADD_BREAKPOINT |
-| 6     | 2    | 0-65535 | Breakpoint address |
-| 8     | 1-n  | 0-terminated string | Breakpoint condition. Just 0 if no condition. |
+| 0     | 2    | 0-65535 | Breakpoint address |
+| *2    | 1    | 0-255 | The bank+1 of the breakpoint. |
+| 3     | 1-n  | 0-terminated string | Breakpoint condition. Just 0 if no condition. |
 
 
-Response:
+Response (Length=3):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 3     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 2    | 1-65535/0 | Breakpoint ID. 0 is returned if no BP is available anymore. |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 2    | 1-65535/0 | Breakpoint ID. 0 is returned if no BP is available anymore. |
 
 
+Note: long addresses (with bank info) are passed, bank=0: 64k address
 
-## CMD_REMOVE_BREAKPOINT
+## CMD_REMOVE_BREAKPOINT=41
 
-Command:
+Command (Length=2):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 4     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 41    | CMD_REMOVE_BREAKPOINT |
-| 6     | 2    | 1-65535 | Breakpoint ID |
+| 0     | 2    | 1-65535 | Breakpoint ID |
 
 
-Response:
+Response (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
 | 4     | 1    | 1-255 | Same seq no |
 
 
+## CMD_ADD_WATCHPOINT=42
 
-## CMD_ADD_WATCHPOINT
-
-Command:
+Command (Length=6):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 6+n   | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 42    | CMD_ADD_WATCHPOINT |
-| 6     | 2    | 0-65535 | Start of watchpoint address range |
-| 6     | 2    | 0-65535 | Size of watchpoint address range |
-| 6     | 1    | Bit 0: read, Bit 1: write | Access type: read, write or read/write |
-| 8     | 1-n  | 0-terminated string | Breakpoint condition. Just 0 if no condition. |
+| 0     | 2    | 0-65535 | Start of watchpoint address range |
+| 2     | 1    | 0-255 | bank+1 info |
+| 3     | 2    | 0-65535 | Size of watchpoint address range |
+| 5     | 1    | Bit 0: read, Bit 1: write | Access type: read, write or read/write |
 
 
-Response:
+Response (Length=2):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2     | Length     |
-| 4     | 1    | 1-255 | Same seq no |
-| 5     | 1    | 0/1   | 0=success, other=error, e.g. no watchpoints available |
+| 0     | 1    | 1-255 | Same seq no |
+| 1     | 1    | 0/1   | 0=success, other=error, e.g. no watchpoints available |
 
+Note: long addresses (with bank info) are passed, bank=0: 64k address
 
-## CMD_REMOVE_WATCHPOINT
+## CMD_REMOVE_WATCHPOINT=43
 
-Command:
+Command (Length=6):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 43    | CMD_REMOVE_WATCHPOINT |
-| 6     | 2    | 0-65535 | Start of watchpoint address range |
-| 6     | 2    | 0-65535 | Size of watchpoint address range |
+| 0     | 2    | 0-65535 | Start of watchpoint address range |
+| 2     | 1    | 0-255 | bank+1 info |
+| 3     | 2    | 0-65535 | Size of watchpoint address range |
+| 5     | 1    | Bit 0: read, Bit 1: write | Access type: read, write or read/write |
 
 
-Response:
+Response (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
 | 4     | 1    | 1-255 | Same seq no |
 
 
-## CMD_READ_STATE
+## CMD_READ_STATE=50
 
-Command:
+Command (Length=0):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2     | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 50    | CMD_READ_STATE |
+| -     | -    | -     | -          |
 
 
-Response:
+Response (Length=1+N):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1+N   | Length     |
 | 4     | 1    | 1-255 | Same seq no |
 | 5     | N    |       | Arbitrary data. The format is up to the remote. |
 
 
-## CMD_WRITE_STATE
+## CMD_WRITE_STATE=51
 
-Command:
+Command (Length=N):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 2+N   | Length     |
-| 4     | 1    | 1-255 | Seq no     |
-| 5     | 1    | 51    | CMD_WRITE_STATE |
 | 6     | N    |       | Arbitrary data. This is data that has previously been retrieved via CMD_READ_STATE. |
 
-Response:
+Response (Length=1):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 1     | Length     |
 | 4     | 1    | 1-255 | Same seq no |
 
 
@@ -747,14 +713,14 @@ Response:
 
 ## NTF_PAUSE
 
-Notification:
+Notification (Length=6+n):
 | Index | Size | Value |Description |
 |-------|------|-------|------------|
-| 0     | 4    | 5+n   | Length     |
-| 4     | 1    | 0     | Instead of Seq No. |
-| 6     | 1    | 1     | NTF_PAUSE  |
-| 7     | 1    | 0-255 | Break reason: 0 = no reason (e.g. a step-over), 1 = manual break, 2 = breakpoint hit, 3 = watchpoint hit read access, 4 = watchpoint hit write access, 255 = some other reason, the error string might have useful information for the user |
-| 8     | 2    | 0-65535 | Breakpoint or watchpoint address. |
-| 10    | 1-n  | error string | Null-terminated error string. Might in theory have almost 2^32 byte length. In practice it will be normally less than 256.
+| 0     | 1    | 0     | Instead of Seq No. |
+| 1     | 1    | 1     | NTF_PAUSE  |
+| 2     | 1    | 0-255 | Break reason: 0 = no reason (e.g. a step-over), 1 = manual break, 2 = breakpoint hit, 3 = watchpoint hit read access, 4 = watchpoint hit write access, 255 = some other reason: the reason string might have useful information for the user |
+| 3     | 2    | 0-65535 | Breakpoint or watchpoint address. |
+| *5    | 1    | 0-255 | The bank+1 of the breakpoint or watchpoint address. |
+| 6    | 1-n  | reason string | Null-terminated break reason string. Might in theory have almost 2^32 byte length. In practice it will be normally less than 256.
 If error string is empty it will contain at least a 0. |
 
